@@ -128,11 +128,6 @@ class CustomDatasetV3(Dataset):
         self.processor = processor
         self.color_paths = []
         self.seman_paths = []
-        # for root_dir in root_dirs:
-        #     for idx in range(200):
-        #         i = idx * 10
-        #         self.color_paths.append(f"{root_dir}/color_{i:04d}.jpg")
-        #         self.seman_paths.append(f"{root_dir}/semantic_map_{i:04d}.npy")
         self.color_paths,self.seman_paths = self.get_filepaths(root_dirs)
 
     def get_filepaths(self,root_dirs):
@@ -140,7 +135,6 @@ class CustomDatasetV3(Dataset):
         seman_paths = []
         for root_dir in root_dirs:
             color_files = os.path.join(root_dir, 'rgb/color_*.jpg')
-            # seman_files = os.path.join(root_dir, 'semantic/semantic_map_*.npy')
             current_color_paths = glob.glob(color_files)
             current_semantic_paths = []
             for j in range(len(current_color_paths)):
@@ -221,7 +215,6 @@ def semantic_mask_to_rgb(mask: torch.Tensor, save_path: str):
     """
     # Get the number of unique classes
     unique_classes = torch.unique(mask).tolist()
-    #num_classes = max(unique_classes) + 1  # Assuming classes start from 0
 
     # Generate a random colormap
     num_classes = 102
@@ -324,7 +317,7 @@ if __name__ == "__main__":
 
     run = wandb.init(
         # Set the wandb entity where your project will be logged (generally your team name).
-        entity="sit-visionlab",
+        entity="finetune-oneformer-replica",
         # Set the wandb project where this run will be logged.
         project="finetune_oneformer",
         # Track hyperparameters and run metadata.
@@ -347,8 +340,6 @@ if __name__ == "__main__":
     processor = AutoProcessor.from_pretrained(main_cfg.oneformer["checkpoint"])
     model = AutoModelForUniversalSegmentation.from_pretrained(main_cfg.oneformer["checkpoint"], is_training=True)
     version = 'finetune_all'
-    # finetune_ckpt = f'./data/checkpoint/oneformer/{version}/step_10000'
-    # model = AutoModelForUniversalSegmentation.from_pretrained(finetune_ckpt, is_training=True)
 
     processor.image_processor.num_text = model.config.num_queries - model.config.text_encoder_n_ctx
     class_info_file = './configs/Replica/office0/class_info_file.json'
@@ -362,7 +353,6 @@ if __name__ == "__main__":
     train_root_dirs = []
     for selected_scene in finetune_scenes:
         img_save_dir = f'./data/replica_sim_finetune/{selected_scene}/results_habitat/'
-        #img_save_dir = f'./data/{main_cfg.general.dataset}/{selected_scene}/finetune/'
         train_root_dirs.append(img_save_dir)
 
     test_root_dirs = []
