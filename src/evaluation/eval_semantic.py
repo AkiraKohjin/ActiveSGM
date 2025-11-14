@@ -77,8 +77,10 @@ if __name__ == "__main__":
     ### Save Final Mesh and Checkpoint
     ##################################################
     # slam.print_and_save_result()
-    slam.eval_semantic_result(eval_dir_suffix=args.stage, ignore_first_frame=True, save_frames=True)
-    # slam.eval_semantic_result_mp3d(eval_dir_suffix=args.stage, ignore_first_frame=True, save_frames=True)
+    if main_cfg.general.dataset in ['MP3D']:
+        slam.eval_semantic_result_mp3d(eval_dir_suffix=args.stage, ignore_first_frame=True, save_frames=True)
+    else:
+        slam.eval_semantic_result(eval_dir_suffix=args.stage, ignore_first_frame=True, save_frames=True)
 
 
     ##################################################
