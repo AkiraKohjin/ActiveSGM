@@ -1,0 +1,415 @@
+version: 2.1
+
+orbs:
+  codecov: codecov/codecov@1.1.1
+
+executors:
+  ubuntu-18_04:
+    docker:
+    - image: ubuntu:bionic-20220427
+  # Anything below 11.7 is deprecated as of June 6th 2022
+  xcode-11_7:
+    macos:
+      xcode: 11.7.0
+  emscripten:
+    docker:
+    # 1.39.0 is the oldest on Docker. Anything before 1.39.2 is useless as emar
+    # randomly asserts: https://github.com/emscripten-core/emscripten/pull/9742
+    # Then, anything before 1.39.6 is useless as well because emar has a
+    # filesystem race and randomly complains that a file doesn't exist:
+    # https://github.com/mosra/magnum/issues/413,
+    # https://github.com/emscripten-core/emscripten/pull/10161
+    #
+    # Regarding SIMD, while 1.39.6 supports some WIP variant of it, the
+    # finalized support is only since 2.0.18 (and then the first non-broken
+    # emsdk is 2.0.25). But emsdk ships with Node.js 14, and only Node.js 15
+    # supports intrinsics that Emscripten 2.0.18 can produce, so there's no
+    # point in even trying, we wouldn't be able to run the tests anyway.
+    # TODO: revisit when https://github.com/emscripten-core/emsdk/issues/1064
+    #   or any other referenced issues are finally resolved
+    - image: emscripten/emsdk:1.39.6-upstream
+  python-3_6:
+    docker:
+    - image: python:3.6.12
+  android-29:
+    machine:
+      image: android:202102-01
+  arm64:
+    machine:
+      image: ubuntu-2004:202101-01
+    resource_class: arm.medium
+
+commands:
+  install-base-linux:
+    parameters:
+      extra:
+        type: string
+        default: ""
+    steps:
+    - run:
+        name: Update apt and install base packages
+        command: |
+          apt update
+          if [[ "$CMAKE_CXX_FLAGS" == *"--coverage"* ]]; then export LCOV_PACKAGES="lcov curl"; fi
+          # libidn11 needed by CMake
+          apt install -y ninja-build libidn11 $LCOV_PACKAGES << parameters.extra >>
+
+  install-base-linux-arm64:
+    parameters:
+      extra:
+        type: string
+        default: ""
+    steps:
+    - run:
+        name: Update apt and install base packages
+        # Compared to Docker images this needs sudo
+        command: |
+          sudo apt update
+          if [[ "$CMAKE_CXX_FLAGS" == *"--coverage"* ]]; then export LCOV_PACKAGES="lcov curl"; fi
+          sudo apt install -y ninja-build gcc cmake $LCOV_PACKAGES << parameters.extra >>
+
+  install-base-macos:
+    parameters:
+      extra:
+        type: string
+        default: ""
+    steps:
+    - run:
+        name: Install base packages
+        # As usual, homebrew takes five minutes to update and then explodes in
+        # a spectacular way. How is this acceptable?!
+        command: |
+          if [[ "$CMAKE_CXX_FLAGS" == *"--coverage"* ]]; then export LCOV_PACKAGES="lcov"; fi
+          HOMEBREW_NO_AUTO_UPDATE=1 brew install cmake ninja $LCOV_PACKAGES << parameters.extra >>
+
+  install-base-android:
+    steps:
+    - run:
+        name: Create Android 29 x86 AVD
+        command: |
+          SYSTEM_IMAGES="system-images;android-29;default;x86"
+          sdkmanager "$SYSTEM_IMAGES"
+          echo "no" | avdmanager --verbose create avd -n test -k "$SYSTEM_IMAGES"
+    - run:
+        name: Launch Android emulator
+        command: |
+          emulator -avd test -delay-adb -verbose -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
+        background: true
+    - run:
+        name: Update apt and install base packages
+        # Compared to Docker images this needs sudo
+        command: |
+          sudo apt update
+          sudo apt install -y ninja-build
+
+  install-gcc-4_8:
+    steps:
+    - run:
+        name: Install GCC 4.8
+        # For some reason, CMake needs a working C compiler, so provice CC as
+        # well for the case when default gcc isn't installed.
+        command: |
+          apt install -y g++-4.8
+          echo 'export CC=gcc-4.8' >> $BASH_ENV
+          echo 'export CXX=g++-4.8' >> $BASH_ENV
+
+  # While we want to make sure the project builds on GCC 4.8 as certain
+  # embedded toolchains still use it, for Clang we just pick the version
+  # available in the oldest supported distro.
+  install-clang:
+    steps:
+    - run:
+        # For some reason, CMake needs a working C compiler, so provice CC as
+        # well for the case when default gcc isn't installed.
+        #
+        # The llvm-symbolizer link needs to be set in order to have usable
+        # symbols in the output. This affects suppressions as well, meaning
+        # they won't work if the symbols are not resolvable. It's not enough to
+        # just `export ASAN_SYMBOLIZER_PATH=/usr/bin/llvm-symbolizer-6.0`
+        # because it then complains that
+        #
+        #   External symbolizer path is set to '/usr/bin/llvm-symbolizer-6.0'
+        #   which isn't a known symbolizer. Please set the path to the
+        #   llvm-symbolizer binary or other known tool.
+        #
+        # Probably because because it detects tool type based on the filename?
+        # Ugh.
+        name: Install Clang
+        command: |
+          apt install -y clang
+          echo 'export CC=clang' >> $BASH_ENV
+          echo 'export CXX=clang++' >> $BASH_ENV
+          ls -l /usr/bin/llvm-symbolizer-6.0
+          ln -s /usr/bin/llvm-symbolizer{-6.0,}
+
+  install-cmake:
+    parameters:
+      version:
+        type: string
+      sudo:
+        type: string
+        default: ""
+    steps:
+    - run:
+        name: Install CMake << parameters.version >>
+        command: |
+          version_short=<< parameters.version >>
+          version_short="${version_short%.*}"
+          << parameters.sudo >> apt install -y wget
+          mkdir -p $HOME/cmake && cd $HOME/cmake
+          wget -nc --no-check-certificate https://cmake.org/files/v$version_short/cmake-<< parameters.version >>-Linux-x86_64.tar.gz
+          tar --strip-components=1 -xzf cmake-<< parameters.version >>-Linux-x86_64.tar.gz
+          echo 'export PATH=$HOME/cmake/bin:$PATH' >> $BASH_ENV
+          source $BASH_ENV
+          cmake --version | grep << parameters.version >>
+          ctest --version | grep << parameters.version >>
+
+  make-expected-linux-dirs:
+    steps:
+    - run:
+        name: Create files expected by Utility::Path tests on Linux
+        command: |
+          mkdir -p ~/.config/autostart
+          mkdir -p ~/.local
+
+  build:
+    parameters:
+      script:
+        type: string
+    steps:
+    - checkout
+    - run:
+        name: Build & test
+        command: |
+          if [ "$BUILD_STATIC" != "ON" ]; then export BUILD_STATIC=OFF; fi
+          if [ "$BUILD_DEPRECATED" != "OFF" ]; then export BUILD_DEPRECATED=ON; fi
+          ./package/ci/<< parameters.script >>
+
+  lcov:
+    steps:
+    - run:
+        name: Collect code coverage
+        # Keep in sync with PKBUILD-coverage and appveyor-lcov.sh, please
+        command: |
+          lcov $LCOV_EXTRA_OPTS --directory . --capture --output-file coverage.info > /dev/null
+          lcov $LCOV_EXTRA_OPTS --extract coverage.info "*/src/Corrade/*" --output-file coverage.info > /dev/null
+          lcov $LCOV_EXTRA_OPTS --remove coverage.info "*/Test/*" --output-file coverage.info > /dev/null
+          lcov $LCOV_EXTRA_OPTS --remove coverage.info "*/build/src/Corrade/*" --output-file coverage.info > /dev/null
+    - codecov/upload:
+        file: coverage.info
+
+jobs:
+  linux:
+    executor: ubuntu-18_04
+    environment:
+      CMAKE_CXX_FLAGS: --coverage
+      LCOV_EXTRA_OPTS: --gcov-tool /usr/bin/gcov-4.8
+      CONFIGURATION: Debug
+    steps:
+    # Install also Git so we verify that Git version embedding works
+    - install-base-linux:
+        extra: git
+    - install-gcc-4_8
+    - install-cmake:
+        version: "3.4.3"
+    - make-expected-linux-dirs
+    - build:
+        script: unix-desktop.sh
+    - lcov
+
+  linux-arm64:
+    executor: arm64
+    environment:
+      CMAKE_CXX_FLAGS: --coverage
+      CONFIGURATION: Debug
+    steps:
+    # Not installing the old GCC 4.8 and CMake 3.4 to speed up. These are
+    # tested more than enough on other jobs.
+    - install-base-linux-arm64
+    - make-expected-linux-dirs
+    - build:
+        script: unix-desktop.sh
+    - lcov
+
+  linux-static:
+    executor: ubuntu-18_04
+    environment:
+      # STUPID yml interprets unquoted ON as a boolean
+      # https://stackoverflow.com/questions/53648244/specifying-the-string-value-yes-in-a-yaml-property
+      BUILD_STATIC: "ON"
+      CMAKE_CXX_FLAGS: --coverage
+      LCOV_EXTRA_OPTS: --gcov-tool /usr/bin/gcov-4.8
+      CONFIGURATION: Debug
+    steps:
+    - install-base-linux
+    - install-gcc-4_8
+    - install-cmake:
+        version: "3.4.3"
+    - make-expected-linux-dirs
+    - build:
+        script: unix-desktop.sh
+    - lcov
+
+  linux-nondeprecated:
+    executor: ubuntu-18_04
+    environment:
+      # STUPID yml interprets unquoted OFF as a boolean
+      BUILD_DEPRECATED: "OFF"
+      CMAKE_CXX_FLAGS: -DCORRADE_NO_ASSERT
+      CONFIGURATION: Release
+    steps:
+    - install-base-linux
+    - install-gcc-4_8
+    - install-cmake:
+        version: "3.4.3"
+    - make-expected-linux-dirs
+    - build:
+        script: unix-desktop.sh
+
+  linux-sanitizers:
+    executor: ubuntu-18_04
+    environment:
+      CMAKE_CXX_FLAGS: -fsanitize=address
+      CONFIGURATION: Debug
+    steps:
+    - install-base-linux
+    - install-clang
+    - install-cmake:
+        version: "3.4.3"
+    - make-expected-linux-dirs
+    - build:
+        script: unix-desktop.sh
+
+  linux-threadsanitizer:
+    executor: ubuntu-18_04
+    environment:
+      CMAKE_CXX_FLAGS: -fsanitize=thread
+      CONFIGURATION: Debug
+    steps:
+    - install-base-linux
+    - install-clang
+    - install-cmake:
+        version: "3.4.3"
+    - make-expected-linux-dirs
+    - build:
+        script: unix-desktop.sh
+
+  macos:
+    executor: xcode-11_7
+    environment:
+      CMAKE_CXX_FLAGS: --coverage
+      CONFIGURATION: Debug
+    steps:
+    - install-base-macos
+    - build:
+        script: unix-desktop.sh
+    - lcov
+
+  macos-static:
+    executor: xcode-11_7
+    environment:
+      # STUPID yml interprets unquoted ON as a boolean
+      BUILD_STATIC: "ON"
+      CMAKE_CXX_FLAGS: --coverage
+      CONFIGURATION: Debug
+    steps:
+    - install-base-macos
+    - build:
+        script: unix-desktop.sh
+    - lcov
+
+  emscripten:
+    executor: emscripten
+    steps:
+    - install-base-linux
+    - build:
+        script: emscripten.sh
+
+  android-x86:
+    executor: android-29
+    steps:
+    - install-base-android
+    # We need ctest --timeout for flaky adb push, which is since 3.17. The
+    # image had 3.16.3 by default, so it's just a small jump.
+    - install-cmake:
+        version: "3.17.5"
+        sudo: sudo
+    - build:
+        script: android-x86.sh
+
+  ios:
+    executor: xcode-11_7
+    environment:
+      # Yep, xcodebuild is beyond stupid and just DOESN'T build in parallel by
+      # default. The default medium resource class has 4 CPUs and Ninja uses
+      # -j6, so do the same for xcodebuild.
+      XCODE_JOBS: 6
+    steps:
+    - install-base-macos:
+        extra: xcbeautify
+    - build:
+        script: ios-simulator.sh
+
+  # Python preprocessor for magnum-singles, for a lack of better name
+  acme:
+    executor: python-3_6
+    steps:
+    - run:
+        name: Install coverage and codecov
+        command: pip install coverage codecov
+    - checkout
+    - run:
+        name: Run tests and collect coverage
+        working_directory: src/acme
+        command: coverage run -m unittest
+    - run:
+        name: Upload coverage
+        working_directory: src/acme
+        command: codecov
+
+workflows:
+  version: 2
+  build:
+    # While there's no actual execution or data dependency between the jobs,
+    # this is done in order to reduce unnecessary credit usage. The base and
+    # non-deprecated Linux builds are taken as the main sanity checks. Only
+    # if they pass, the rest of the jobs gets gradually executed, with further
+    # dependencies especially for the macOS jobs that take the most credits.
+    jobs:
+    - linux
+    - linux-nondeprecated
+    - linux-arm64:
+        requires:
+        - linux
+        - linux-nondeprecated
+    - linux-static:
+        requires:
+        - linux
+        - linux-nondeprecated
+    - linux-sanitizers:
+        requires:
+        - linux
+        - linux-nondeprecated
+    - linux-threadsanitizer:
+        requires:
+        - linux-sanitizers
+    - macos:
+        requires:
+        - linux
+        - linux-nondeprecated
+    - macos-static:
+        requires:
+        - macos
+        - linux-static
+    - emscripten:
+        requires:
+        - linux-static
+    - android-x86:
+        requires:
+        - linux-static
+        - linux-arm64
+    - ios:
+        requires:
+        - macos-static
+        - linux-arm64
+    - acme

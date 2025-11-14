@@ -1,0 +1,86 @@
+{
+  "asset": {
+    "version": "2.0"
+  },
+  "nodes": [
+    {
+      "note": "not part of any scene, but still has the names registered",
+      "extras": {
+        "registeredButNotInAnyScene": 3
+      }
+    },
+    {
+      "name": "no extras property"
+    },
+    {
+      "name": "extras not an object",
+      "extras": []
+    },
+    {
+      "name": "ignored types",
+      "note": "none of these will have their names registered",
+      "extras": {
+        "invalidBoolField": true,
+        "invalidNullField": null,
+        "invalidArrayField": [],
+        "invalidObjectField": {}
+      }
+    },
+    {
+      "name": "empty extras",
+      "extras": {}
+    },
+    {
+      "note": "duplicate keys are turned into multiple occurences of the same field because that's the zero-effort way to handle those",
+      "extras": {
+        "radius": 5.25,
+        "offset": 17,
+        "UppercaseName": -56,
+        "offset": -22,
+        "category": "duplicated",
+        "category": "very",
+        "radius": 3.5
+      }
+    },
+    {
+      "name": "invalid values",
+      "note": "the offset and flags fail only because they're set to be parsed as Int and UnsignedInt, respectively; category is then supposed to be a string and offset a number",
+      "extras": {
+        "radius": 56.0f,
+        "offset": 23.5,
+        "category": 155,
+        "flags": -1,
+        "offset": "none"
+      }
+    },
+    {
+      "note": "to verify the 32-bit precision doesn't get lost along the way",
+      "extras": {
+        "offset": -2147483648
+      }
+    },
+    {
+      "extras": {
+        "radius": 0.5,
+        "category": "noteless"
+      }
+    },
+    {
+      "note": "to verify the 32-bit precision doesn't get lost along the way",
+      "extras": {
+        "radius": 5.5,
+        "category": "positive",
+        "flags": 4294967295
+      }
+    }
+  ],
+  "scenes": [
+    {
+      "nodes": [1, 2, 3, 4, 5, 6, 7, 8]
+    },
+    {
+      "note": "fields get specified in order of node discovery",
+      "nodes": [9, 8]
+    }
+  ]
+}

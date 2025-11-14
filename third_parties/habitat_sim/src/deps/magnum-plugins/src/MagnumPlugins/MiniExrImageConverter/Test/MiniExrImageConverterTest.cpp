@@ -1,0 +1,150 @@
+/*
+    This file is part of Magnum.
+
+    Copyright © 2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019,
+                2020, 2021, 2022 Vladimír Vondruš <mosra@centrum.cz>
+
+    Permission is hereby granted, free of charge, to any person obtaining a
+    copy of this software and associated documentation files (the "Software"),
+    to deal in the Software without restriction, including without limitation
+    the rights to use, copy, modify, merge, publish, distribute, sublicense,
+    and/or sell copies of the Software, and to permit persons to whom the
+    Software is furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included
+    in all copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+    THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+    FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+    DEALINGS IN THE SOFTWARE.
+*/
+
+#include <sstream>
+#include <Corrade/Containers/Array.h>
+#include <Corrade/Containers/Optional.h>
+#include <Corrade/Containers/String.h>
+#include <Corrade/TestSuite/Tester.h>
+#include <Corrade/TestSuite/Compare/StringToFile.h>
+#include <Corrade/Utility/DebugStl.h> /** @todo remove once Debug is stream-free */
+#include <Corrade/Utility/FormatStl.h>
+#include <Corrade/Utility/Path.h>
+#include <Magnum/ImageView.h>
+#include <Magnum/PixelFormat.h>
+#include <Magnum/Trade/AbstractImageConverter.h>
+
+#include "configure.h"
+
+namespace Magnum { namespace Trade { namespace Test { namespace {
+
+struct MiniExrImageConverterTest: TestSuite::Tester {
+    explicit MiniExrImageConverterTest();
+
+    void wrongFormat();
+
+    void rgb();
+    void rgba();
+
+    void unsupportedMetadata();
+
+    /* Explicitly forbid system-wide plugin dependencies */
+    PluginManager::Manager<AbstractImageConverter> _manager{"nonexistent"};
+};
+
+const struct {
+    const char* name;
+    ImageFlags2D flags;
+    const char* message;
+} UnsupportedMetadataData[]{
+    {"1D array", ImageFlag2D::Array,
+        "1D array images are unrepresentable in OpenEXR, saving as a regular 2D image"}
+};
+
+MiniExrImageConverterTest::MiniExrImageConverterTest() {
+    addTests({&MiniExrImageConverterTest::wrongFormat,
+
+              &MiniExrImageConverterTest::rgb,
+              &MiniExrImageConverterTest::rgba});
+
+    addInstancedTests({&MiniExrImageConverterTest::unsupportedMetadata},
+        Containers::arraySize(UnsupportedMetadataData));
+
+    /* Load the plugin directly from the build tree. Otherwise it's static and
+       already loaded. */
+    #ifdef MINIEXRIMAGECONVERTER_PLUGIN_FILENAME
+    CORRADE_INTERNAL_ASSERT_OUTPUT(_manager.load(MINIEXRIMAGECONVERTER_PLUGIN_FILENAME) & PluginManager::LoadState::Loaded);
+    #endif
+}
+
+void MiniExrImageConverterTest::wrongFormat() {
+    Containers::Pointer<AbstractImageConverter> converter = _manager.instantiate("MiniExrImageConverter");
+
+    const char data[4]{};
+    std::ostringstream out;
+    Error redirectError{&out};
+    CORRADE_VERIFY(!converter->convertToData(ImageView2D{PixelFormat::R16F, {1, 1}, data}));
+    CORRADE_COMPARE(out.str(), "Trade::MiniExrImageConverter::convertToData(): unsupported pixel format PixelFormat::R16F\n");
+}
+
+constexpr const char RgbData[] = {
+    /* Skip */
+    0, 0, 0, 0, 0, 0, 0, 0,
+
+    1, 2, 3, 2, 3, 4, 0, 0,
+    3, 4, 5, 4, 5, 6, 0, 0,
+    5, 6, 7, 6, 7, 8, 0, 0
+};
+
+const ImageView2D Rgb{PixelStorage{}.setSkip({0, 1, 0}),
+    PixelFormat::RGB16F, {1, 3}, RgbData};
+
+constexpr const char RgbaData[] = {
+    1, 2, 3, 2, 3, 4, 9, 9,
+    3, 4, 5, 4, 5, 6, 9, 9,
+    5, 6, 7, 6, 7, 8, 9, 9
+};
+
+const ImageView2D Rgba{PixelFormat::RGBA16F, {1, 3}, RgbaData};
+
+void MiniExrImageConverterTest::rgb() {
+    Containers::Pointer<AbstractImageConverter> converter = _manager.instantiate("MiniExrImageConverter");
+    CORRADE_COMPARE(converter->extension(), "exr");
+    CORRADE_COMPARE(converter->mimeType(), "image/x-exr");
+
+    Containers::Optional<Containers::Array<char>> data = converter->convertToData(Rgb);
+    CORRADE_VERIFY(data);
+    CORRADE_COMPARE_AS(Containers::StringView{*data},
+        Utility::Path::join(MINIEXRIMAGECONVERTER_TEST_DIR, "image.exr"),
+        TestSuite::Compare::StringToFile);
+}
+
+void MiniExrImageConverterTest::rgba() {
+    Containers::Optional<Containers::Array<char>> data = _manager.instantiate("MiniExrImageConverter")->convertToData(Rgba);
+    CORRADE_VERIFY(data);
+    /* Alpha is ignored, so it is the same file */
+    CORRADE_COMPARE_AS(Containers::StringView{*data},
+        Utility::Path::join(MINIEXRIMAGECONVERTER_TEST_DIR, "image.exr"),
+        TestSuite::Compare::StringToFile);
+}
+
+void MiniExrImageConverterTest::unsupportedMetadata() {
+    auto&& data = UnsupportedMetadataData[testCaseInstanceId()];
+    setTestCaseDescription(data.name);
+
+    Containers::Pointer<AbstractImageConverter> converter = _manager.instantiate("MiniExrImageConverter");
+
+    const char imageData[8]{};
+    ImageView2D image{PixelFormat::RGBA16F, {1, 1}, imageData, data.flags};
+
+    std::ostringstream out;
+    Warning redirectWarning{&out};
+    CORRADE_VERIFY(converter->convertToData(image));
+    CORRADE_COMPARE(out.str(), Utility::formatString("Trade::MiniExrImageConverter::convertToData(): {}\n", data.message));
+}
+
+}}}}
+
+CORRADE_TEST_MAIN(Magnum::Trade::Test::MiniExrImageConverterTest)

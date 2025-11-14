@@ -1,0 +1,50 @@
+# Author: mosra <mosra@centrum.cz>
+pkgname=magnum-integration
+pkgver=dev
+pkgrel=1
+pkgdesc="Integration libraries for the Magnum C++11/C++14 graphics engine"
+arch=('i686' 'x86_64')
+url="https://magnum.graphics"
+license=('MIT')
+depends=('magnum' 'bullet' 'eigen' 'glm' 'imgui-src')
+makedepends=('cmake' 'ninja')
+options=('!strip' '!buildflags')
+provides=('magnum-integration-git')
+
+_rootdir=$startdir/../../
+
+build() {
+    mkdir -p "$_rootdir/build"
+    cd "$_rootdir/build"
+
+    cmake .. \
+        -DCMAKE_CONFIGURATION_TYPES="Debug;Release" \
+        -DCMAKE_CROSS_CONFIGS=all \
+        -DCMAKE_INSTALL_PREFIX=/usr \
+        -DIMGUI_DIR=/opt/imgui \
+        -DMAGNUM_WITH_BULLET=ON \
+        -DMAGNUM_WITH_DART=OFF \
+        -DMAGNUM_WITH_EIGEN=ON \
+        -DMAGNUM_WITH_GLM=ON \
+        -DMAGNUM_WITH_IMGUI=ON \
+        -DMAGNUM_BUILD_TESTS=ON \
+        -DMAGNUM_BUILD_GL_TESTS=ON \
+        -G "Ninja Multi-Config"
+    ninja all:all
+}
+
+check() {
+    cd "$_rootdir/build"
+    export CORRADE_TEST_SKIP_BENCHMARKS=ON
+    export CORRADE_TEST_COLOR=ON
+
+    for config in Debug Release; do
+        ctest -C $config --output-on-failure -j
+        MAGNUM_DISABLE_EXTENSIONS="GL_ARB_draw_elements_base_vertex" ctest -C $config --output-on-failure -j -R GLTest
+    done
+}
+
+package() {
+    cd "$_rootdir/build"
+    DESTDIR="$pkgdir/" ninja install:Debug install/strip:Release
+}
