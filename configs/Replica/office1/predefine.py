@@ -75,13 +75,9 @@ if slam["method"] == "semsplatam":
         semantic_dir="./data/replica_v1/office_0/habitat/",
         class_info_file='./configs/Replica/office0/class_info_file.json',
         semantic_device="cuda:1",
-        oneformer_checkpoint='./data/checkpoint/oneformer/finetune_all/step_27880',
-        fastsam_checkpoint='./data/checkpoint/FastSAM/FastSAM.pt',
+        oneformer_checkpoint='lly00412/oneformer-replica-finetune',
         coco_checkpoint='shi-labs/oneformer_coco_swin_large',
         ade20k_checkpoint="shi-labs/oneformer_ade20k_swin_large",
-        blip_checkpoint='Salesforce/blip-image-captioning-large',
-        clipseg_checkpoint='CIDAS/clipseg-rd64-refined',
-        clip_checkpoint="openai/clip-vit-large-patch14",
 
         ### override ###
         override = dict(

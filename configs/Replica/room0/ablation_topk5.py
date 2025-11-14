@@ -79,7 +79,7 @@ if slam["method"] == "semsplatam":
         semantic_dir="./data/replica_v1/office_0/habitat/",
         class_info_file='./configs/Replica/office0/class_info_file.json',
         semantic_device="cuda:1",
-        oneformer_checkpoint='./data/checkpoint/oneformer/finetune_replica',
+        oneformer_checkpoint='lly00412/oneformer-replica-finetune',
         coco_checkpoint='shi-labs/oneformer_coco_swin_large',
         ade20k_checkpoint="shi-labs/oneformer_ade20k_swin_large",
 
