@@ -12,8 +12,7 @@ EXP=${3:-ActiveSem} # config in configs/{DATASET}/{scene}/{EXP}.py will be loade
 ENABLE_VIS=${4:-0}
 GPU_ID=${5:-0}
 
-#export CUDA_VISIBLE_DEVICES=${GPU_ID}
-export CUDA_VISIBLE_DEVICES=0,1
+export CUDA_VISIBLE_DEVICES=${GPU_ID}
 PROJ_DIR=${PWD}
 DATASET=Replica
 RESULT_DIR=${PROJ_DIR}/results/

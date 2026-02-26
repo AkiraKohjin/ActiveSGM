@@ -3,7 +3,7 @@
 # Define the base directory containing the SCENE directories.
 BASE_DIR=${1:-"data/replica_v1"}
 
-sudo apt install jq
+#sudo apt install jq
 
 # Iterate over each SCENE directory within the base directory.
 for scene_dir in "$BASE_DIR"/*/; do
