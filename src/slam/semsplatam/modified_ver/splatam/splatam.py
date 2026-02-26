@@ -16,11 +16,12 @@ import matplotlib.pyplot as plt
 from third_parties.splatam.utils.slam_external import build_rotation
 from third_parties.splatam.utils.gs_external import update_params_and_optimizer, inverse_sigmoid,cat_params_to_optimizer, accumulate_mean2d_gradient
 from diff_gaussian_rasterization import GaussianRasterizer as Renderer
-from channel_rasterization import GaussianRasterizationSettings as Camera
+from sparse_channel_rasterization import GaussianRasterizationSettings as Camera
 from sparse_channel_rasterization import GaussianRasterizer as SEMRenderer_sparse
 from sparse_channel_rasterization import GaussianRasterizationSettings as Camera_sparse
 
 from src.slam.semsplatam.modified_ver.semantic.oneformer import positive_normalize
+from src.utils import active_sgm_debug as dbg
 
 def setup_camera(w, h, k, w2c, near=0.01, far=100, num_channels=102):
     fx, fy, cx, cy = k[0][0], k[1][1], k[0][2], k[1][2]
@@ -32,12 +33,14 @@ def setup_camera(w, h, k, w2c, near=0.01, far=100, num_channels=102):
                                 [0.0, 0.0, far / (far - near), -(far * near) / (far - near)],
                                 [0.0, 0.0, 1.0, 0.0]]).cuda().float().unsqueeze(0).transpose(1, 2)
     full_proj = w2c.bmm(opengl_proj)
+    # Background must match num_channels to avoid out-of-bounds reads in CUDA.
+    bg = torch.zeros((num_channels,), dtype=torch.float32, device="cuda")
     cam = Camera(
         image_height=h,
         image_width=w,
         tanfovx=w / (2 * fx),
         tanfovy=h / (2 * fy),
-        bg=torch.tensor([0, 0, 0], dtype=torch.float32, device="cuda"),
+        bg=bg,
         scale_modifier=1.0,
         viewmatrix=w2c,
         projmatrix=full_proj,
@@ -46,6 +49,7 @@ def setup_camera(w, h, k, w2c, near=0.01, far=100, num_channels=102):
         prefiltered=False,
         debug=False,
         num_channels=num_channels,
+        cls_ids=torch.zeros((1, 1), dtype=torch.int32, device="cuda"),
     )
     return cam
 
@@ -73,6 +77,7 @@ def create_differentiable_sparse_tensor(dense_tensor, topk_indices, dense_shape)
     return sparse_tensor
 def get_pointcloud_with_seman(color, depth, seman, intrinsics, w2c, transform_pts=True,
                    mask=None, compute_mean_sq_dist=False, mean_sq_dist_method="projective"):
+    dbg.log_pointcloud_seman_stats(seman)
     width, height = color.shape[2], color.shape[1]
     CX = intrinsics[0][2]
     CY = intrinsics[1][2]
@@ -163,9 +168,12 @@ def initialize_params_with_seman(init_pt_cld, num_frames, mean3_sq_dist, gaussia
     params['cam_unnorm_rots'] = cam_rots
     params['cam_trans'] = np.zeros((1, 3, num_frames))
 
+    dbg.log_init_sem_dense(params['semantic_logits'], "init-seman")
+
     _, topk_indices = torch.topk(params['semantic_logits'], k=TOPK, dim=-1)
     dense_shape = params['semantic_logits'].shape
     seman_sparse = create_differentiable_sparse_tensor(params['semantic_logits'], topk_indices, dense_shape)
+    dbg.log_init_sem_sparse(seman_sparse.coo()[2], "init-seman")
 
     for k, v in params.items():
         # Check if value is already a torch tensor
@@ -258,9 +266,12 @@ def initialize_new_params_with_seman(new_pt_cld, mean3_sq_dist, gaussian_distrib
         'logit_opacities': logit_opacities,
         'log_scales': log_scales,
     }
+    dbg.log_init_sem_dense(params['semantic_logits'], "init-seman-new")
+
     _, topk_indices = torch.topk(params['semantic_logits'], k=TOPK, dim=-1)
     dense_shape = params['semantic_logits'].shape
     seman_sparse = create_differentiable_sparse_tensor(params['semantic_logits'], topk_indices, dense_shape)
+    dbg.log_init_sem_sparse(seman_sparse.coo()[2], "init-seman-new")
 
     for k, v in params.items():
         # Check if value is already a torch tensor
@@ -371,12 +382,17 @@ def transformed_params2semrendervar_sparse(params, transformed_gaussians, seen):
     return rendervar
 
 def set_camera_sparse(cam, cls_ids=None):
+    # Guard against mismatched bg length (e.g., legacy 3-channel bg in semantic mode).
+    if isinstance(cam.bg, torch.Tensor) and cam.bg.numel() != cam.num_channels:
+        cam_bg = torch.zeros((cam.num_channels,), dtype=cam.bg.dtype, device=cam.bg.device)
+    else:
+        cam_bg = cam.bg
     cam = Camera_sparse(
         image_height=cam.image_height,
         image_width=cam.image_width,
         tanfovx=cam.tanfovx,
         tanfovy=cam.tanfovy,
-        bg=cam.bg,
+        bg=cam_bg,
         scale_modifier=1.0,
         viewmatrix=cam.viewmatrix,
         projmatrix=cam.projmatrix,
@@ -387,6 +403,7 @@ def set_camera_sparse(cam, cls_ids=None):
         num_channels=cam.num_channels,
         cls_ids=cls_ids.to(torch.int32)
     )
+    dbg.log_sem_bg(cam)
     return cam
 
 def calc_cosine(tensor1, tensor2, dim=0,return_mean=True, required_normalize=True):
@@ -432,6 +449,7 @@ def calc_hellinger_distance(pred_dist,target_dist,eps=1e-8):
     return dist.mean()
 
 def calc_shannon_entropy(prob_dist,dim=-1):
+    dbg.log_entropy_input(prob_dist)
     prob_dist = prob_dist.to(torch.float32)
     prob_dist = torch.clamp(prob_dist, min=0.001)
     prob_dist = positive_normalize(prob_dist,dim=dim, min=0)
@@ -510,8 +528,19 @@ def get_loss_with_seman(params, curr_data, variables, iter_time_idx, loss_weight
 
     # Semantic Rendering
     seman_rendervar = transformed_params2semrendervar_sparse(params, transformed_gaussians, seen)
-    sparse_cam = set_camera_sparse(cam=curr_data['cam'],cls_ids=variables['seman_cls_ids'])
+    # Align cls_ids with the seen subset to avoid class/gaussian index mismatch.
+    cls_ids = variables['seman_cls_ids'].to(seen.device)
+    if cls_ids.shape[0] == seen.shape[0]:
+        cls_ids = cls_ids[seen]
+    sparse_cam = set_camera_sparse(cam=curr_data['cam'], cls_ids=cls_ids)
+    dbg.log_seman_rendervar(seman_rendervar, variables.get("seman_cls_ids", None))
     seman_im, _, = SEMRenderer_sparse(raster_settings=sparse_cam)(**seman_rendervar)
+    dbg.log_seman_repeat(seman_im, seman_rendervar, sparse_cam, SEMRenderer_sparse)
+    if dbg.env_flag("ACTIVE_SGM_DEBUG_SEM_SANITY", False):
+        cls_zero = torch.zeros_like(variables['seman_cls_ids'])
+        cam_zero = set_camera_sparse(cam=curr_data['cam'], cls_ids=cls_zero)
+        dbg.log_seman_sanity(seman_rendervar, sparse_cam, SEMRenderer_sparse, cam_zero)
+    dbg.log_seman_loss_stats(seman_im, curr_data['seman'])
 
     # Mask with valid depth values (accounts for outlier depth values)
     nan_mask = (~torch.isnan(depth)) & (~torch.isnan(uncertainty))
@@ -543,6 +572,8 @@ def get_loss_with_seman(params, curr_data, variables, iter_time_idx, loss_weight
         losses['im'] = torch.abs(curr_data['im'] - im).sum()
     else:
         losses['im'] = 0.8 * l1_loss_v1(im, curr_data['im']) + 0.2 * (1.0 - calc_ssim(im, curr_data['im']))
+
+    dbg.log_seman_nan_coverage(seman_im, presence_sil_mask, mask, curr_data, iter_time_idx)
 
     # Semantic Loss
     if tracking and (use_sil_for_loss or ignore_outlier_depth_loss):
@@ -613,6 +644,7 @@ def get_loss_with_seman(params, curr_data, variables, iter_time_idx, loss_weight
 
     weighted_losses = {k: v * loss_weights[k] for k, v in losses.items()}
     loss = sum(weighted_losses.values())
+    dbg.log_nonfinite_loss(loss)
 
     variables['max_2D_radius'][seen] = torch.max(radius[seen], variables['max_2D_radius'][seen])
     variables['seen'] = seen

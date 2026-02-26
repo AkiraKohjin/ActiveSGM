@@ -16,11 +16,17 @@ from third_parties.splatam.utils.eval_helpers import evaluate_ate
 # modified version
 from src.slam.splatam.eval_helper import transform_to_frame,resize_tensor
 from src.utils.general_utils import *
-from src.slam.semsplatam.modified_ver.splatam.splatam import calc_cosine, transformed_params2semrendervar,setup_camera
+from src.slam.semsplatam.modified_ver.splatam.splatam import (
+    calc_cosine,
+    transformed_params2semrendervar,
+    transformed_params2semrendervar_sparse,
+    setup_camera,
+    set_camera_sparse,
+)
 import matplotlib.pyplot as plt
 
 from diff_gaussian_rasterization import GaussianRasterizer as Renderer
-from channel_rasterization import GaussianRasterizer as SEMRenderer
+from sparse_channel_rasterization import GaussianRasterizer as SEMRenderer
 
 loss_fn_alex = LearnedPerceptualImagePatchSimilarity(net_type='alex', normalize=True).cuda()
 
@@ -113,6 +119,8 @@ def eval(slam_model, dataset, final_params, final_variables, num_frames, eval_di
         os.makedirs(render_rgb_dir, exist_ok=True)
         render_depth_dir = os.path.join(eval_dir, "rendered_depth")
         os.makedirs(render_depth_dir, exist_ok=True)
+        render_seman_dir = os.path.join(eval_dir, "rendered_seman")
+        os.makedirs(render_seman_dir, exist_ok=True)
         rgb_dir = os.path.join(eval_dir, "rgb")
         os.makedirs(rgb_dir, exist_ok=True)
         depth_dir = os.path.join(eval_dir, "depth")
@@ -193,8 +201,14 @@ def eval(slam_model, dataset, final_params, final_variables, num_frames, eval_di
                                     torch.clamp(weighted_gt_im.unsqueeze(0), 0.0, 1.0)).item()
 
         # Render Semantic and compute cosine similarity
-        seman_rendervar = transformed_params2semrendervar(final_params, final_variables, transformed_gaussians, seen)
-        rastered_seman, _, = SEMRenderer(raster_settings=curr_data['cam'])(**seman_rendervar)  # 133.H.W
+        sem_cam = cam
+        if 'seman_cls_ids' in final_variables:
+            cls_ids = final_variables['seman_cls_ids'].to(seen.device)
+            if cls_ids.shape[0] == seen.shape[0]:
+                cls_ids = cls_ids[seen]
+            sem_cam = set_camera_sparse(cam=cam, cls_ids=cls_ids)
+        seman_rendervar = transformed_params2semrendervar_sparse(final_params, transformed_gaussians, seen)
+        rastered_seman, _, = SEMRenderer(raster_settings=sem_cam)(**seman_rendervar)  # 133.H.W
         cosine_score = calc_cosine(curr_data['seman'], rastered_seman, dim=0).item()
 
 
@@ -254,6 +268,8 @@ def eval(slam_model, dataset, final_params, final_variables, num_frames, eval_di
             # Save Semantic RGB
             cv2.imwrite(os.path.join(seman_dir, "gt_{:04d}.png".format(time_idx)),
                         cv2.cvtColor(gt_seman_rgb, cv2.COLOR_RGB2BGR))
+            cv2.imwrite(os.path.join(render_seman_dir, "gs_{:04d}.png".format(time_idx)),
+                        cv2.cvtColor(rastered_seman_rgb, cv2.COLOR_RGB2BGR))
 
 
         # Plot the Ground Truth and Rasterized RGB & Depth, along with Silhouette
@@ -436,14 +452,59 @@ def report_progress(params, variables, data, i, progress_bar, iter_time_idx, sil
         im, radii, _, = Renderer(raster_settings=data['cam'])(**rendervar)
         seen = radii > 0
 
-        seman_rendervar = transformed_params2semrendervar(params, variables, transformed_gaussians, seen)
-        rastered_seman, _, = SEMRenderer(raster_settings=data['cam'])(**seman_rendervar)  # 133.H.W
+        skip_sem_vis = os.environ.get("ACTIVE_SGM_SKIP_SEMANTIC_VIZ", "") == "1"
+        rastered_seman = None
+        if not skip_sem_vis:
+            sem_cam = data['cam']
+            if 'seman_cls_ids' in variables:
+                cls_ids = variables['seman_cls_ids'].to(seen.device)
+                if cls_ids.shape[0] == seen.shape[0]:
+                    cls_ids = cls_ids[seen]
+                sem_cam = set_camera_sparse(cam=data['cam'], cls_ids=cls_ids)
+            seman_rendervar = transformed_params2semrendervar_sparse(params, transformed_gaussians, seen)
+            rastered_seman, _, = SEMRenderer(raster_settings=sem_cam)(**seman_rendervar)  # 133.H.W
+            if os.environ.get("ACTIVE_SGM_SYNC_AFTER_SEMRENDER", "") == "1":
+                torch.cuda.synchronize()
+
+        def _log_tensor_meta(tensor, name):
+            try:
+                shape = tuple(tensor.shape)
+                dtype = tensor.dtype
+                device = tensor.device
+                contig = tensor.is_contiguous()
+                stride = tensor.stride()
+                print(
+                    f"[ActiveSGM][seman-debug] {name}: "
+                    f"shape={shape} dtype={dtype} device={device} "
+                    f"contiguous={contig} stride={stride}"
+                )
+            except Exception as exc:
+                print(f"[ActiveSGM][seman-debug] {name}: failed to log meta: {exc}")
 
         sem_colormap = create_class_colormap(data['seman'].shape[0])
-        seman_ids = data['seman'].argmax(0).detach().cpu().numpy()
-        seman_rgb = apply_colormap(seman_ids, sem_colormap)
-        rastered_seman_ids = rastered_seman.argmax(0).detach().cpu().numpy()
-        rastered_seman_rgb = apply_colormap(rastered_seman_ids, sem_colormap)
+        use_cpu_argmax = os.environ.get("ACTIVE_SGM_SEMAN_CPU_ARGMAX", "") == "1"
+        seman_rgb = None
+        rastered_seman_rgb = None
+        if not skip_sem_vis:
+            try:
+                if use_cpu_argmax:
+                    seman_ids = data['seman'].detach().cpu().argmax(0).numpy()
+                else:
+                    seman_ids = data['seman'].argmax(0).detach().cpu().numpy()
+                seman_rgb = apply_colormap(seman_ids, sem_colormap)
+            except Exception:
+                _log_tensor_meta(data['seman'], "data['seman']")
+                raise
+
+            try:
+                if use_cpu_argmax:
+                    rastered_seman_ids = rastered_seman.detach().cpu().argmax(0).numpy()
+                else:
+                    rastered_seman_ids = rastered_seman.argmax(0).detach().cpu().numpy()
+                rastered_seman_rgb = apply_colormap(rastered_seman_ids, sem_colormap)
+            except Exception:
+                _log_tensor_meta(rastered_seman, "rastered_seman")
+                raise
 
         if tracking:
             psnr = calc_psnr(im * presence_sil_mask, data['im'] * presence_sil_mask).mean()
@@ -493,17 +554,19 @@ def report_progress(params, variables, data, i, progress_bar, iter_time_idx, sil
                 fig_title = f"Time-Step: {iter_time_idx} | Iter: {i} | Frame: {data['id']}"
             else:
                 fig_title = f"Time-Step: {online_time_idx} | Iter: {i} | Frame: {data['id']}"
-            plot_rgbds_silhouette_fast(data['im'], data['depth'], seman_rgb, im, rastered_depth, rastered_seman_rgb, presence_sil_mask, diff_depth_l1,
-                                 psnr, depth_l1, fig_title, wandb_run=wandb_run, wandb_step=wandb_step, 
-                                 wandb_title=f"{stage} Qual Viz")
+            if seman_rgb is not None and rastered_seman_rgb is not None:
+                plot_rgbds_silhouette_fast(data['im'], data['depth'], seman_rgb, im, rastered_depth, rastered_seman_rgb, presence_sil_mask, diff_depth_l1,
+                                     psnr, depth_l1, fig_title, wandb_run=wandb_run, wandb_step=wandb_step,
+                                     wandb_title=f"{stage} Qual Viz")
         elif eval_dir is not None:
             plot_name = "%04d" % online_time_idx
             fig_title = "Time Step: {}".format(online_time_idx)
             plot_dir = os.path.join(eval_dir, "plots_progress")
             os.makedirs(plot_dir, exist_ok=True)
-            plot_rgbds_silhouette_fast(data['im'], data['depth'], seman_rgb, im, rastered_depth, rastered_seman_rgb, presence_sil_mask, diff_depth_l1,
-                                 psnr, depth_l1, fig_title, plot_dir, 
-                                 plot_name=plot_name, save_plot=True)
+            if seman_rgb is not None and rastered_seman_rgb is not None:
+                plot_rgbds_silhouette_fast(data['im'], data['depth'], seman_rgb, im, rastered_depth, rastered_seman_rgb, presence_sil_mask, diff_depth_l1,
+                                     psnr, depth_l1, fig_title, plot_dir,
+                                     plot_name=plot_name, save_plot=True)
 
 def calc_miou(pred: torch.Tensor, target: torch.Tensor) -> float:
     """
@@ -792,7 +855,6 @@ def eval_semantic(slam_model, dataset, final_params, final_variables, num_frames
             # Setup Camera
             cam = setup_camera(color.shape[1], color.shape[0], intrinsics.cpu().numpy(),
                                first_frame_w2c.detach().cpu().numpy(), num_channels=n_cls)
-
             sem_colormap = label_colormap(n_cls)
 
 
@@ -822,8 +884,14 @@ def eval_semantic(slam_model, dataset, final_params, final_variables, num_frames
         seen = radius > 0
 
         # Render Semantic and compute cosine similarity
-        seman_rendervar = transformed_params2semrendervar(final_params, final_variables, transformed_gaussians, seen)
-        rastered_seman, _, = SEMRenderer(raster_settings=curr_data['cam'])(**seman_rendervar)  # 133.H.W
+        sem_cam = cam
+        if 'seman_cls_ids' in final_variables:
+            cls_ids = final_variables['seman_cls_ids'].to(seen.device)
+            if cls_ids.shape[0] == seen.shape[0]:
+                cls_ids = cls_ids[seen]
+            sem_cam = set_camera_sparse(cam=cam, cls_ids=cls_ids)
+        seman_rendervar = transformed_params2semrendervar_sparse(final_params, transformed_gaussians, seen)
+        rastered_seman, _, = SEMRenderer(raster_settings=sem_cam)(**seman_rendervar)  # 133.H.W
 
         rastered_seman = torch.nan_to_num(rastered_seman, nan=0.0)
         rastered_seman[rastered_seman<0] = 0.0
@@ -1035,7 +1103,6 @@ def eval_semantic_mp3d(slam_model, dataset, final_params, final_variables, num_f
             # Setup Camera
             cam = setup_camera(color.shape[1], color.shape[0], intrinsics.cpu().numpy(),
                                first_frame_w2c.detach().cpu().numpy(), num_channels=n_cls)
-
             sem_colormap = label_colormap(n_cls)
 
         # Skip frames if not eval_every
@@ -1061,9 +1128,14 @@ def eval_semantic_mp3d(slam_model, dataset, final_params, final_variables, num_f
         seen = radius > 0
 
         # Render Semantic and compute cosine similarity
-        seman_rendervar = transformed_params2semrendervar(final_params, final_variables, transformed_gaussians,
-                                                          seen)
-        rastered_seman, _, = SEMRenderer(raster_settings=curr_data['cam'])(**seman_rendervar)  # 133.H.W
+        sem_cam = cam
+        if 'seman_cls_ids' in final_variables:
+            cls_ids = final_variables['seman_cls_ids'].to(seen.device)
+            if cls_ids.shape[0] == seen.shape[0]:
+                cls_ids = cls_ids[seen]
+            sem_cam = set_camera_sparse(cam=cam, cls_ids=cls_ids)
+        seman_rendervar = transformed_params2semrendervar_sparse(final_params, transformed_gaussians, seen)
+        rastered_seman, _, = SEMRenderer(raster_settings=sem_cam)(**seman_rendervar)  # 133.H.W
 
         rastered_seman = torch.nan_to_num(rastered_seman, nan=0.0)
         rastered_seman[rastered_seman < 0] = 0.0
