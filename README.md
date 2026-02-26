@@ -1,5 +1,7 @@
 # ActiveSGM: Semantics-driven Active Mapping
 
+Note: This fork contains local debug changes on top of the upstream ActiveSGM repository (https://github.com/lly00412/ActiveSGM).
+
 This is the Python implementation of the ActiveSGM with SplaTAM backbone. (**Understanding while Exploring:
 Semantics-driven Active Mapping**. Published at Neurips 2025) [[Paper](https://arxiv.org/abs/2506.00225)]
 
@@ -11,10 +13,18 @@ We provide scripts to create the conda environment, and recommend running Active
 
 ```
 # Download
-git clone --recursive https://github.com/lly00412/ActiveSGM
+git clone https://github.com/lly00412/ActiveSGM
+cd ActiveSGM
+
+# Initialize submodules (required for third_parties)
+# Use --recursive to fetch nested submodules (e.g., SplaTAM's rasterizer).
+git submodule update --init --recursive
+
+# If you already cloned this repo before, run:
+# git submodule sync --recursive
+# git submodule update --init --recursive
 
 # Build conda environment
-cd ActiveSGM
 bash scripts/installation/conda_env/build_sem.sh
 ```
 ### Build cuda tool for semantic rendering
