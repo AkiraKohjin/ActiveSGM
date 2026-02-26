@@ -72,7 +72,10 @@ if slam["method"] == "semsplatam":
         ##### Semantic Network #######
         semantic_dir="./data/replica_v1/office_0/habitat/",
         class_info_file='./configs/Replica/office0/class_info_file.json',
-        semantic_device="cuda:1",
+        # Single-GPU default. For multi-GPU semantic offload, change to "cuda:1".
+        # NOTE: Multi-GPU P2P copy may be unstable on some nodes; use CPU hop via
+        # ACTIVE_SGM_SEMAN_CPU_HOP=1 if needed.
+        semantic_device="cuda:0",
         oneformer_checkpoint='lly00412/oneformer-replica-finetune',
         coco_checkpoint='shi-labs/oneformer_coco_swin_large',
         ade20k_checkpoint="shi-labs/oneformer_ade20k_swin_large",
@@ -164,4 +167,3 @@ visualizer = dict(
     ### mesh related ###
     # mesh_vis_freq = 500,                                # mesh save frequency
 )
-
