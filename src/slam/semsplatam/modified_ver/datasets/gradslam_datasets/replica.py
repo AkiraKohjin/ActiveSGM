@@ -44,6 +44,11 @@ class ReplicaDataset(GradSLAMDataset):
         )
         if self.load_semantics:
             self.semantic_paths = self.get_semantic_filepaths()
+            if not self.semantic_paths:
+                sem_dir = os.path.join(self.input_folder, "results_habitat", "semantic")
+                raise FileNotFoundError(
+                    f"Semantic GT not found. Expected semantic*.npy under: {sem_dir}"
+                )
 
 
     def get_filepaths(self):
