@@ -25,6 +25,7 @@ SOFTWARE.
 import cv2
 import os
 import sys
+import json
 sys.path.append(os.getcwd())
 from tensorboardX import SummaryWriter
 import torch
@@ -197,6 +198,22 @@ if __name__ == "__main__":
 
     new_data_dir = f"data/replica_sim_nvs/{main_cfg.general.scene}/results_habitat"
     os.makedirs(new_data_dir, exist_ok=True)
+    semantic_dir = os.path.join(new_data_dir, "semantic")
+    os.makedirs(semantic_dir, exist_ok=True)
+    instance_dir = os.path.join(new_data_dir, "instance")
+    os.makedirs(instance_dir, exist_ok=True)
+
+    # Load id_to_label mapping for class GT
+    scene_key = f"{main_cfg.general.scene[:-1]}_{main_cfg.general.scene[-1]}"
+    info_semantic_path = os.path.join("data", "replica_v1", scene_key, "habitat", "info_semantic.json")
+    with open(info_semantic_path, "r") as f:
+        info_semantic = json.load(f)
+    id_to_label = torch.tensor(info_semantic["id_to_label"]).long()
+
+    # Optional: limit number of frames for quick sanity checks
+    max_frames_env = os.environ.get("ACTIVE_SGM_NVS_MAX_FRAMES", "")
+    if max_frames_env.isdigit() and int(max_frames_env) > 0:
+        nvs_poses = nvs_poses[: int(max_frames_env)]
     nvs_poses_slam = []
     for i in range(len(nvs_poses)):
         update_module_step(i, [sim, planner, visualizer])
@@ -217,9 +234,10 @@ if __name__ == "__main__":
         ### Simulation
         ##################################################
         timer.start("Simulation", "General")
-        sim_out = sim.simulate(c2w_sim)
+        sim_out = sim.simulate(c2w_sim, return_semantic=True)
         color = sim_out['color']
         depth = sim_out['depth']
+        seman = sim_out.get('seman', None)
         is_too_close = (depth < 0.2).sum() / (depth.shape[0] * depth.shape[1]) > 0.1
         assert not(is_too_close), "Too many close-camera regions"
         if main_cfg.visualizer.vis_rgbd:
@@ -241,6 +259,17 @@ if __name__ == "__main__":
         color = (color.cpu().numpy()*255).astype(np.uint8)
         color = cv2.cvtColor(color, cv2.COLOR_RGB2BGR)
         cv2.imwrite(img_path, color)
+
+        ### Save Semantic (GT) ###
+        if seman is not None:
+            # Instance IDs (raw Habitat semantic)
+            seman_inst = seman.detach().cpu().numpy().astype(np.int32)
+            np.save(os.path.join(instance_dir, f"instance{i:06}.npy"), seman_inst)
+
+            # Class IDs (mapped via id_to_label)
+            seman_cls = id_to_label[seman.long()].cpu().numpy().astype(np.int32)
+            seman_cls[seman_cls < 0] = 0
+            np.save(os.path.join(semantic_dir, f"semantic{i:06}.npy"), seman_cls)
 
     ### Save pose ###
     write_poses_to_file(nvs_poses_slam, os.path.join(new_data_dir, "../traj.txt"))
