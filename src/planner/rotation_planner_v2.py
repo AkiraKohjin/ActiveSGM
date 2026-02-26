@@ -26,6 +26,10 @@ def lerp_quaternions(start_quat, end_quat, max_angle_deg):
     # Calculate the minimum steps required
     min_steps = int(np.ceil(total_angle_rad / max_angle_rad))
 
+    # No rotation needed; avoid division by zero
+    if min_steps == 0:
+        return np.array([start_quat]), 0
+
     quaternions = []
     for i in range(min_steps + 1):
         t = i / min_steps
@@ -127,6 +131,11 @@ def smoothen_trajectory(start_pose, end_pose, positions, max_angle_deg=10, gravi
 
     # Initialize rotations array
     rotations = np.zeros((max(num_of_points, num_of_rotations), 3))
+    if interp_quats.size == 0:
+        # Fallback: keep start rotation when interpolation yields no samples
+        rotations[:num_of_points] = R.from_quat(start_quat).as_euler('xyz', degrees=True)
+        poses = np.hstack((positions, rotations[:num_of_points]))
+        return poses_to_transformation_matrices(poses)
 
     # Case 1: More rotations than positions
     if num_of_rotations > num_of_points:
@@ -217,7 +226,8 @@ def smoothen_trajectory(start_pose, end_pose, positions, max_angle_deg=10, gravi
         end_count = num_of_rotations - start_count
 
         # Apply rotations at the start
-        rotations[:start_count] = R.from_quat(interp_quats[:start_count]).as_euler('xyz', degrees=True)
+        if start_count > 0:
+            rotations[:start_count] = R.from_quat(interp_quats[:start_count]).as_euler('xyz', degrees=True)
 
         # Set center rotations to match the last rotation at start boundary
         center_rotation = R.from_quat(interp_quats[start_count]).as_euler('xyz', degrees=True)
@@ -443,7 +453,8 @@ def smoothen_trajectory_v2(start_pose, end_pose, positions, max_angle_deg=10, gr
         end_count = num_of_rotations - start_count
 
         # Apply rotations at the start
-        rotations[:start_count] = R.from_quat(interp_quats[:start_count]).as_euler('xyz', degrees=True)
+        if start_count > 0:
+            rotations[:start_count] = R.from_quat(interp_quats[:start_count]).as_euler('xyz', degrees=True)
 
         # Set center rotations to match the last rotation at start boundary
         center_rotation = R.from_quat(interp_quats[start_count]).as_euler('xyz', degrees=True)
