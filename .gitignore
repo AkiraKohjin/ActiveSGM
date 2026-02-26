@@ -1,6 +1,27 @@
 *.xml
 *.iml
+*.DS_Store
+*.tar.gz.part??
+/assets/additional_habitat_configs.zip
+/data/
 /data/checkpoint/
-/third_parties/
+# Third-party backups/snapshots (keep out of git).
+/third_parties/*.bk_*
+/third_parties/*.bak_*
 *.bin
 *.pth
+__pycache__/
+*.pyc
+/results/
+/tmp/
+/experiments/
+/.codex/
+/codex-guidelines.md
+/handoff/
+/milestone/
+/visualization/
+/.ipynb_checkpoints/
+/.logs/
+
+# Editor settings
+.vscode/
