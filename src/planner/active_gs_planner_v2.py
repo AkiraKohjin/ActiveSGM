@@ -1197,6 +1197,49 @@ class ActiveGSPlannerv2(NarutoPlanner):
                     ### semantic information
                     topk_prob, _ = torch.topk(logits, 16, dim=0)
                     entropy = calc_shannon_entropy(topk_prob, dim=0).mean()
+                    if os.environ.get("ACTIVE_SGM_DEBUG_ENTROPY", "0") == "1":
+                        if not hasattr(self, "_entropy_debug_count"):
+                            self._entropy_debug_count = 0
+                        max_logs = int(os.environ.get("ACTIVE_SGM_DEBUG_ENTROPY_MAX", "50"))
+                        mode = os.environ.get("ACTIVE_SGM_DEBUG_ENTROPY_MODE", "nonfinite").lower()
+                        do_log = True
+                        if mode == "nonfinite" and torch.isfinite(entropy):
+                            do_log = False
+                        if do_log and self._entropy_debug_count < max_logs:
+                            self._entropy_debug_count += 1
+                            cand_key = None
+                            try:
+                                cand_key = cand_keys[i]
+                            except Exception:
+                                pass
+                            try:
+                                entropy_val = float(entropy.item())
+                            except Exception:
+                                entropy_val = float("nan")
+                            logits_finite = torch.isfinite(logits)
+                            topk_finite = torch.isfinite(topk_prob)
+                            logits_bad = int((~logits_finite).sum().item())
+                            topk_bad = int((~topk_finite).sum().item())
+                            if logits_finite.any():
+                                logits_min = float(logits[logits_finite].min().item())
+                                logits_max = float(logits[logits_finite].max().item())
+                                logits_mean = float(logits[logits_finite].mean().item())
+                            else:
+                                logits_min = logits_max = logits_mean = float("nan")
+                            if topk_finite.any():
+                                topk_min = float(topk_prob[topk_finite].min().item())
+                                topk_max = float(topk_prob[topk_finite].max().item())
+                                topk_mean = float(topk_prob[topk_finite].mean().item())
+                            else:
+                                topk_min = topk_max = topk_mean = float("nan")
+                            self.info_printer(
+                                f"[EntropyDebug] step={self.step} cand_idx={i} cand_key={cand_key} "
+                                f"entropy={entropy_val} logits_bad={logits_bad} topk_bad={topk_bad} "
+                                f"logits_min={logits_min:.6f} logits_max={logits_max:.6f} logits_mean={logits_mean:.6f} "
+                                f"topk_min={topk_min:.6f} topk_max={topk_max:.6f} topk_mean={topk_mean:.6f}",
+                                self.step,
+                                self.__class__.__name__,
+                            )
                     seman_entropies.append(entropy)
 
                 ### compute weighted exploration I.G., weighted by distance ###
