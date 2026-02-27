@@ -1,7 +1,0 @@
-CameraNode {
-    ObjectRef { ref { %myOtherCamera } }
-}
-
-CameraObject %myCamera {}
-
-CameraObject %myOtherCamera {}

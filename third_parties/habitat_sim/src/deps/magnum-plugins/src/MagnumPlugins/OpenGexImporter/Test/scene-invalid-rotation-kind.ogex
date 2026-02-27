@@ -1,5 +1,0 @@
-Node {}
-
-Node {
-    Rotation (kind = "Quaternion") { float[4] {} }
-}

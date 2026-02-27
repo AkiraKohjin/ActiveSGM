@@ -1,6 +1,0 @@
-Node {}
-Node {}
-
-Node {
-    Translation (kind = "XYZ") { float[3] {} }
-}

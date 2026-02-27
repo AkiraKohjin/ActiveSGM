@@ -1,4 +1,0 @@
-type = "<III"
-input = [0xaaaaaaaa, 0xbbbbbbbb, 0xcccccccc]
-
-# kate: hl python

@@ -1,6 +1,0 @@
-Node {}
-Node {}
-
-LightNode {
-    ObjectRef { ref { null } }
-}

@@ -1,6 +1,0 @@
-Node {}
-Node {}
-
-Node {
-    Rotation (kind = "z") { float[4] {{ 1.570796327, 0.0, 0.0, 1.0 }} }
-}

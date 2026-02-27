@@ -1,6 +1,0 @@
-Plugin name: AnyImageImporter
-Features:
-  OpenData
-  FileCallback
-Configuration:
-  someOption=yes

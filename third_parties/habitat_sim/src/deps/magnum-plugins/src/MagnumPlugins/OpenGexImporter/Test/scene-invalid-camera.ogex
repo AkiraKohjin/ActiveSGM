@@ -1,5 +1,0 @@
-Node {}
-
-CameraNode {
-    ObjectRef { ref { null } }
-}

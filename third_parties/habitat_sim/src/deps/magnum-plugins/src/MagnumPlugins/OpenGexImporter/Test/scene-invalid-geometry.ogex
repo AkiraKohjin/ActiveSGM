@@ -1,5 +1,0 @@
-Node {}
-
-GeometryNode {
-    ObjectRef { ref { null } }
-}
