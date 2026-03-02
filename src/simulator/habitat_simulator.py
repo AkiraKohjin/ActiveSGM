@@ -55,13 +55,14 @@ class HabitatSim(Simulator):
         super(HabitatSim, self).__init__(main_cfg, info_printer)
 
         cfg = mmengine.Config.fromfile(self.sim_cfg.habitat_cfg)
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
         if disable_erp:
             cfg.camera.equirectangular.enable = False
         
         if cfg.camera.equirectangular.enable:
             pano_hw = tuple(cfg.camera.equirectangular.resolution_hw)
-            self.erp_depth_to_erp_dist = ERPDepth2Dist(512, pano_hw, 'cuda') 
+            self.erp_depth_to_erp_dist = ERPDepth2Dist(512, pano_hw, self.device) 
         
         if disable_pinhole:
             cfg.camera.pinhole.enable = False
@@ -157,7 +158,9 @@ class HabitatSim(Simulator):
                 erp_depth = torch.from_numpy(erp_depth.astype(np.float32))
                 # Set invalid depths to high values. It is more convenient in many situations than keeping them zero.
                 erp_depth[erp_depth==0] = 1e8   
-                erp_depth = self.erp_depth_to_erp_dist(erp_depth.unsqueeze(0).unsqueeze(0).to('cuda'))
+                erp_depth = self.erp_depth_to_erp_dist(
+                    erp_depth.unsqueeze(0).unsqueeze(0).to(self.device)
+                )
             
             if erp_seman is not None:
                 ### convert to colormap ###

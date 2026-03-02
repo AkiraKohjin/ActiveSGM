@@ -67,7 +67,15 @@ if __name__ == "__main__":
     ##################################################
     log_savedir = os.path.join(main_cfg.dirs.result_dir, "logger")
     os.makedirs(log_savedir, exist_ok=True)
-    logger = SummaryWriter(f'{log_savedir}')
+    # Tensorboard logging is optional for data generation; disable if unavailable.
+    try:
+        if os.environ.get("DISABLE_TENSORBOARDX", "0") != "1":
+            logger = SummaryWriter(f'{log_savedir}')
+        else:
+            logger = None
+    except Exception as exc:
+        info_printer(f"SummaryWriter disabled: {exc}", 0, "Initialization")
+        logger = None
     
     ##################################################
     ### initialize simulator
