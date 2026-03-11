@@ -287,6 +287,8 @@ if __name__ == "__main__":
 
     new_data_dir = f"data/mp3d_sim_nvs_v2/{main_cfg.general.scene}/results_habitat"
     os.makedirs(new_data_dir, exist_ok=True)
+    instance_dir = os.path.join(new_data_dir, 'instance')
+    os.makedirs(instance_dir, exist_ok=True)
     nvs_poses_slam = []
 
     obj_to_cat_file = f"./configs/{main_cfg.general.dataset}/{main_cfg.general.scene}/instance_to_mpcat40.json"
@@ -359,6 +361,7 @@ if __name__ == "__main__":
         ### Save Semantic ###
         np.save(f"{new_data_dir}/semantic/semantic_map_{i:04d}.npy", mpcat40_map)
         semantic_mask_to_rgb(mpcat40_map, f"{new_data_dir}/semantic/semantic_rgb_{i:04d}.png")
+        np.save(f"{new_data_dir}/instance/instance_map_{i:04d}.npy", obj.long().cpu().numpy().astype(np.int32))
 
 
     ### Save pose ###
