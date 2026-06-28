@@ -21,6 +21,7 @@ from src.slam.semsplatam.modified_ver.splatam.splatam import (
     transformed_params2semrendervar,
     transformed_params2semrendervar_sparse,
     setup_camera,
+    setup_camera_gs,
     set_camera_sparse,
 )
 import matplotlib.pyplot as plt
@@ -152,7 +153,11 @@ def eval(slam_model, dataset, final_params, final_variables, num_frames, eval_di
             # Process Camera Parameters
             first_frame_w2c = torch.linalg.inv(pose)
             # Setup Camera
-            cam = setup_camera(color.shape[2], color.shape[1], intrinsics.cpu().numpy(), first_frame_w2c.detach().cpu().numpy(), num_channels=n_cls)
+            # Separate GS camera (diff-gaussian) from semantic camera (sparse-channel).
+            cam_sparse = setup_camera(color.shape[2], color.shape[1], intrinsics.cpu().numpy(),
+                                      first_frame_w2c.detach().cpu().numpy(), num_channels=n_cls)
+            cam_gs = setup_camera_gs(color.shape[2], color.shape[1], intrinsics.cpu().numpy(),
+                                     first_frame_w2c.detach().cpu().numpy())
             # sem_colormap = create_class_colormap(seman.shape[0])
             sem_colormap = label_colormap(seman.shape[0])
 
@@ -169,13 +174,23 @@ def eval(slam_model, dataset, final_params, final_variables, num_frames, eval_di
                                                    )
  
         # Define current frame data
-        curr_data = {'cam': cam, 'im': color, 'depth': depth, 'seman':seman, 'id': time_idx, 'intrinsics': intrinsics, 'w2c': first_frame_w2c}
+        curr_data = {
+            'cam_gs': cam_gs,
+            'cam_sparse': cam_sparse,
+            'im': color,
+            'depth': depth,
+            'seman': seman,
+            'id': time_idx,
+            'intrinsics': intrinsics,
+            'w2c': first_frame_w2c,
+        }
         # Initialize Render Variables
         rendervar = transformed_params2rendervar(final_params, transformed_gaussians)
         depth_sil_rendervar = transformed_params2depthplussilhouette(final_params, curr_data['w2c'],
                                                                      transformed_gaussians)
         # Render Depth & Silhouette
-        depth_sil, _, _, = Renderer(raster_settings=curr_data['cam'])(**depth_sil_rendervar)
+        # diff-gaussian-rasterization returns 8 outputs; keep the first (color/depth_sil).
+        depth_sil, _, *_ = Renderer(raster_settings=curr_data['cam_gs'])(**depth_sil_rendervar)
         rastered_depth = depth_sil[0, :, :].unsqueeze(0)
         # Mask invalid depth in GT
         valid_depth_mask = (curr_data['depth'] > 0)
@@ -185,7 +200,8 @@ def eval(slam_model, dataset, final_params, final_variables, num_frames, eval_di
         presence_sil_mask = (silhouette > sil_thres)
         
         # Render RGB and Calculate PSNR
-        im, radius, _, = Renderer(raster_settings=curr_data['cam'])(**rendervar)
+        # diff-gaussian-rasterization returns 8 outputs; keep RGB + radii.
+        im, radius, *_ = Renderer(raster_settings=curr_data['cam_gs'])(**rendervar)
         seen = radius > 0
 
         if mapping_iters==0 and not add_new_gaussians:
@@ -201,12 +217,12 @@ def eval(slam_model, dataset, final_params, final_variables, num_frames, eval_di
                                     torch.clamp(weighted_gt_im.unsqueeze(0), 0.0, 1.0)).item()
 
         # Render Semantic and compute cosine similarity
-        sem_cam = cam
+        sem_cam = curr_data['cam_sparse']
         if 'seman_cls_ids' in final_variables:
             cls_ids = final_variables['seman_cls_ids'].to(seen.device)
             if cls_ids.shape[0] == seen.shape[0]:
                 cls_ids = cls_ids[seen]
-            sem_cam = set_camera_sparse(cam=cam, cls_ids=cls_ids)
+            sem_cam = set_camera_sparse(cam=curr_data['cam_sparse'], cls_ids=cls_ids)
         seman_rendervar = transformed_params2semrendervar_sparse(final_params, transformed_gaussians, seen)
         rastered_seman, _, = SEMRenderer(raster_settings=sem_cam)(**seman_rendervar)  # 133.H.W
         cosine_score = calc_cosine(curr_data['seman'], rastered_seman, dim=0).item()
@@ -443,24 +459,26 @@ def report_progress(params, variables, data, i, progress_bar, iter_time_idx, sil
         rendervar = transformed_params2rendervar(params, transformed_gaussians)
         depth_sil_rendervar = transformed_params2depthplussilhouette(params, data['w2c'], 
                                                                      transformed_gaussians)
-        depth_sil, _, _, = Renderer(raster_settings=data['cam'])(**depth_sil_rendervar)
+        # diff-gaussian-rasterization returns 8 outputs; keep the first (color/depth_sil).
+        depth_sil, _, *_ = Renderer(raster_settings=data['cam_gs'])(**depth_sil_rendervar)
         rastered_depth = depth_sil[0, :, :].unsqueeze(0)
         valid_depth_mask = (data['depth'] > 0)
         silhouette = depth_sil[1, :, :]
         presence_sil_mask = (silhouette > sil_thres)
 
-        im, radii, _, = Renderer(raster_settings=data['cam'])(**rendervar)
+        # diff-gaussian-rasterization returns 8 outputs; keep RGB + radii.
+        im, radii, *_ = Renderer(raster_settings=data['cam_gs'])(**rendervar)
         seen = radii > 0
 
         skip_sem_vis = os.environ.get("ACTIVE_SGM_SKIP_SEMANTIC_VIZ", "") == "1"
         rastered_seman = None
         if not skip_sem_vis:
-            sem_cam = data['cam']
+            sem_cam = data['cam_sparse']
             if 'seman_cls_ids' in variables:
                 cls_ids = variables['seman_cls_ids'].to(seen.device)
                 if cls_ids.shape[0] == seen.shape[0]:
                     cls_ids = cls_ids[seen]
-                sem_cam = set_camera_sparse(cam=data['cam'], cls_ids=cls_ids)
+                sem_cam = set_camera_sparse(cam=data['cam_sparse'], cls_ids=cls_ids)
             seman_rendervar = transformed_params2semrendervar_sparse(params, transformed_gaussians, seen)
             rastered_seman, _, = SEMRenderer(raster_settings=sem_cam)(**seman_rendervar)  # 133.H.W
             if os.environ.get("ACTIVE_SGM_SYNC_AFTER_SEMRENDER", "") == "1":
@@ -852,9 +870,11 @@ def eval_semantic(slam_model, dataset, final_params, final_variables, num_frames
         if time_idx == 0:
             # Process Camera Parameters
             first_frame_w2c = torch.linalg.inv(pose)
-            # Setup Camera
-            cam = setup_camera(color.shape[1], color.shape[0], intrinsics.cpu().numpy(),
-                               first_frame_w2c.detach().cpu().numpy(), num_channels=n_cls)
+            # Setup Cameras: GS (diff-gaussian) and semantic (sparse-channel) are kept separate.
+            cam_sparse = setup_camera(color.shape[1], color.shape[0], intrinsics.cpu().numpy(),
+                                      first_frame_w2c.detach().cpu().numpy(), num_channels=n_cls)
+            cam_gs = setup_camera_gs(color.shape[1], color.shape[0], intrinsics.cpu().numpy(),
+                                     first_frame_w2c.detach().cpu().numpy())
             sem_colormap = label_colormap(n_cls)
 
 
@@ -873,23 +893,31 @@ def eval_semantic(slam_model, dataset, final_params, final_variables, num_frames
                                                    )
 
         # Define current frame data
-        curr_data = {'cam': cam, 'im': color, 'seman_gt': seman_gt[0],
-                     'seman_pseudo':seman_pseudo, 'seman_pseudo_logits':seman_pseudo_logits,
-                     'id': time_idx, 'intrinsics': intrinsics,
-                     'w2c': first_frame_w2c}
+        curr_data = {
+            'cam_gs': cam_gs,
+            'cam_sparse': cam_sparse,
+            'im': color,
+            'seman_gt': seman_gt[0],
+            'seman_pseudo': seman_pseudo,
+            'seman_pseudo_logits': seman_pseudo_logits,
+            'id': time_idx,
+            'intrinsics': intrinsics,
+            'w2c': first_frame_w2c,
+        }
         # Initialize Render Variables
         rendervar = transformed_params2rendervar(final_params, transformed_gaussians)
         # Render RGB and Calculate PSNR
-        _, radius, _, = Renderer(raster_settings=curr_data['cam'])(**rendervar)
+        # diff-gaussian-rasterization returns 8 outputs; keep radii for visibility.
+        _, radius, *_ = Renderer(raster_settings=curr_data['cam_gs'])(**rendervar)
         seen = radius > 0
 
         # Render Semantic and compute cosine similarity
-        sem_cam = cam
+        sem_cam = cam_sparse
         if 'seman_cls_ids' in final_variables:
             cls_ids = final_variables['seman_cls_ids'].to(seen.device)
             if cls_ids.shape[0] == seen.shape[0]:
                 cls_ids = cls_ids[seen]
-            sem_cam = set_camera_sparse(cam=cam, cls_ids=cls_ids)
+            sem_cam = set_camera_sparse(cam=cam_sparse, cls_ids=cls_ids)
         seman_rendervar = transformed_params2semrendervar_sparse(final_params, transformed_gaussians, seen)
         rastered_seman, _, = SEMRenderer(raster_settings=sem_cam)(**seman_rendervar)  # 133.H.W
 
@@ -1100,9 +1128,11 @@ def eval_semantic_mp3d(slam_model, dataset, final_params, final_variables, num_f
         if time_idx == 0:
             # Process Camera Parameters
             first_frame_w2c = torch.linalg.inv(pose)
-            # Setup Camera
-            cam = setup_camera(color.shape[1], color.shape[0], intrinsics.cpu().numpy(),
-                               first_frame_w2c.detach().cpu().numpy(), num_channels=n_cls)
+            # Setup Cameras: GS (diff-gaussian) and semantic (sparse-channel) are kept separate.
+            cam_sparse = setup_camera(color.shape[1], color.shape[0], intrinsics.cpu().numpy(),
+                                      first_frame_w2c.detach().cpu().numpy(), num_channels=n_cls)
+            cam_gs = setup_camera_gs(color.shape[1], color.shape[0], intrinsics.cpu().numpy(),
+                                     first_frame_w2c.detach().cpu().numpy())
             sem_colormap = label_colormap(n_cls)
 
         # Skip frames if not eval_every
@@ -1117,23 +1147,31 @@ def eval_semantic_mp3d(slam_model, dataset, final_params, final_variables, num_f
                                                    )
 
         # Define current frame data
-        curr_data = {'cam': cam, 'im': color, 'seman_gt': seman_gt[0],
-                     'seman_pseudo': seman_pseudo, 'seman_pseudo_logits': seman_pseudo_logits,
-                     'id': time_idx, 'intrinsics': intrinsics,
-                     'w2c': first_frame_w2c}
+        curr_data = {
+            'cam_gs': cam_gs,
+            'cam_sparse': cam_sparse,
+            'im': color,
+            'seman_gt': seman_gt[0],
+            'seman_pseudo': seman_pseudo,
+            'seman_pseudo_logits': seman_pseudo_logits,
+            'id': time_idx,
+            'intrinsics': intrinsics,
+            'w2c': first_frame_w2c,
+        }
         # Initialize Render Variables
         rendervar = transformed_params2rendervar(final_params, transformed_gaussians)
         # Render RGB and Calculate PSNR
-        _, radius, _, = Renderer(raster_settings=curr_data['cam'])(**rendervar)
+        # diff-gaussian-rasterization returns 8 outputs; keep radii for visibility.
+        _, radius, *_ = Renderer(raster_settings=curr_data['cam_gs'])(**rendervar)
         seen = radius > 0
 
         # Render Semantic and compute cosine similarity
-        sem_cam = cam
+        sem_cam = cam_sparse
         if 'seman_cls_ids' in final_variables:
             cls_ids = final_variables['seman_cls_ids'].to(seen.device)
             if cls_ids.shape[0] == seen.shape[0]:
                 cls_ids = cls_ids[seen]
-            sem_cam = set_camera_sparse(cam=cam, cls_ids=cls_ids)
+            sem_cam = set_camera_sparse(cam=cam_sparse, cls_ids=cls_ids)
         seman_rendervar = transformed_params2semrendervar_sparse(final_params, transformed_gaussians, seen)
         rastered_seman, _, = SEMRenderer(raster_settings=sem_cam)(**seman_rendervar)  # 133.H.W
 

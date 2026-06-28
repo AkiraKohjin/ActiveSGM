@@ -229,10 +229,13 @@ class SemSplatam(SplatamOurs):
             variables: Splatam variables
             intrinsics: camera intrinsics
             first_frame_w2c: first world to camera pose
-            cam
+            cam_gs
+            cam_sparse
             densify_intrinsics
-            densify_cam
-            tracking_cam
+            densify_cam_gs
+            densify_cam_sparse
+            tracking_cam_gs
+            tracking_cam_sparse
             
         """
         color, depth, intrinsics, pose = self.dataset_sample[0]
@@ -256,39 +259,49 @@ class SemSplatam(SplatamOurs):
         seman = seman_dst
 
         if self.seperate_densification_res:
-            # Initialize Parameters, Canonical & Densification Camera parameters
-            params, variables, intrinsics, first_frame_w2c, cam, \
-                densify_intrinsics, densify_cam = initialize_first_timestep(self.dataset_sample, seman, self.num_frames,
-                                                                                 self.config['scene_radius_depth_ratio'],
-                                                                                 self.config['mean_sq_dist_method'],
-                                                                                 densify_dataset=self.densify_dataset_sample,
-                                                                                 gaussian_distribution=self.config['gaussian_distribution'],
-                                                                                 TOPK=self.topk, num_classes=self.n_cls)
-            # return params, variables, intrinsics, first_frame_w2c, cam, \
-            #     densify_intrinsics, densify_cam
+            # Initialize Parameters, Canonical & Densification Cameras (GS + semantic).
+            params, variables, intrinsics, first_frame_w2c, cam_gs, cam_sparse, \
+                densify_intrinsics, densify_cam_gs, densify_cam_sparse = initialize_first_timestep(
+                    self.dataset_sample, seman, self.num_frames,
+                    self.config['scene_radius_depth_ratio'],
+                    self.config['mean_sq_dist_method'],
+                    densify_dataset=self.densify_dataset_sample,
+                    gaussian_distribution=self.config['gaussian_distribution'],
+                    TOPK=self.topk, num_classes=self.n_cls)
+            # Store densification cameras separately for GS and semantic paths.
             self.densify_intrinsics = densify_intrinsics
-            self.densify_cam = densify_cam
+            self.densify_cam_gs = densify_cam_gs
+            self.densify_cam_sparse = densify_cam_sparse
         else:
-            # Initialize Parameters & Canoncial Camera parameters
-            params, variables, intrinsics, first_frame_w2c, cam = initialize_first_timestep(self.dataset_sample, seman, self.num_frames,
-                                                                                            self.config['scene_radius_depth_ratio'],
-                                                                                            self.config['mean_sq_dist_method'],
-                                                                                            gaussian_distribution=self.config['gaussian_distribution'],
-                                                                                            TOPK=self.topk, num_classes=self.n_cls)
-            # return params, variables, intrinsics, first_frame_w2c, cam
+            # Initialize Parameters & Canonical Cameras (GS + semantic).
+            params, variables, intrinsics, first_frame_w2c, cam_gs, cam_sparse = initialize_first_timestep(
+                self.dataset_sample, seman, self.num_frames,
+                self.config['scene_radius_depth_ratio'],
+                self.config['mean_sq_dist_method'],
+                gaussian_distribution=self.config['gaussian_distribution'],
+                TOPK=self.topk, num_classes=self.n_cls)
+            # Densification uses the canonical cameras when resolutions match.
             self.densify_intrinsics = intrinsics
-            self.densify_cam = cam
+            self.densify_cam_gs = cam_gs
+            self.densify_cam_sparse = cam_sparse
         
         if self.seperate_tracking_res:
-            self.tracking_cam = setup_camera(self.tracking_color.shape[2], self.tracking_color.shape[1], 
-                                        self.tracking_intrinsics.cpu().numpy(), first_frame_w2c.detach().cpu().numpy(),
-                                             num_channels = self.n_cls)
+            # Tracking cameras (GS + semantic) for alternate resolution.
+            self.tracking_cam_sparse = setup_camera(self.tracking_color.shape[2], self.tracking_color.shape[1],
+                                                    self.tracking_intrinsics.cpu().numpy(),
+                                                    first_frame_w2c.detach().cpu().numpy(),
+                                                    num_channels=self.n_cls)
+            self.tracking_cam_gs = setup_camera_gs(self.tracking_color.shape[2], self.tracking_color.shape[1],
+                                                   self.tracking_intrinsics.cpu().numpy(),
+                                                   first_frame_w2c.detach().cpu().numpy())
 
         self.params = params
         self.variables = variables
         self.intrinsics = intrinsics
         self.first_frame_w2c = first_frame_w2c
-        self.cam = cam
+        # Store canonical cameras (GS + semantic).
+        self.cam_gs = cam_gs
+        self.cam_sparse = cam_sparse
     
     @torch.no_grad()
     def render(self, c2w: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -301,7 +314,7 @@ class SemSplatam(SplatamOurs):
             depth: (1,H,W) # render depth
             mask: (1,H,W) valid rendering mask
         '''
-        cam = self.cam
+        cam_gs = self.cam_gs
         first_frame_w2c = self.first_frame_w2c
         gt_w2c = torch.linalg.inv(c2w)
         cam_params = self.initialize_cam_params(1)
@@ -330,8 +343,10 @@ class SemSplatam(SplatamOurs):
         depth_sil_rendervar = transformed_params2depthplussilhouette(params, first_frame_w2c, 
                                                                      transformed_gaussians)
     
-        im, radii, _, = Renderer(raster_settings=cam)(**rendervar)
-        depth_sil, _, _, = Renderer(raster_settings=cam)(**depth_sil_rendervar)
+        # diff-gaussian-rasterization returns 8 outputs; keep RGB + radii.
+        im, radii, *_ = Renderer(raster_settings=cam_gs)(**rendervar)
+        # diff-gaussian-rasterization returns 8 outputs; keep the first (color/depth_sil).
+        depth_sil, _, *_ = Renderer(raster_settings=cam_gs)(**depth_sil_rendervar)
         rastered_depth = depth_sil[0, :, :].unsqueeze(0)
         valid_depth_mask = (depth_sil[0:1] > 0)
         silhouette = depth_sil[1, :, :]
@@ -353,7 +368,7 @@ class SemSplatam(SplatamOurs):
             class_ids: (H,W) # semantic class ids
             logits: (C,H,W) # semantic probability logits
         '''
-        cam = self.cam
+        cam_sparse = self.cam_sparse
         first_frame_w2c = self.first_frame_w2c
         gt_w2c = torch.linalg.inv(c2w)
         cam_params = self.initialize_cam_params(1)
@@ -390,7 +405,8 @@ class SemSplatam(SplatamOurs):
         cls_ids = variables['seman_cls_ids'].to(seen.device)
         if cls_ids.shape[0] == seen.shape[0]:
             cls_ids = cls_ids[seen]
-        sparse_cam = set_camera_sparse(cam=cam, cls_ids=cls_ids)
+        # Use sparse-channel camera for semantic rasterization to avoid GS setting mismatch.
+        sparse_cam = set_camera_sparse(cam=cam_sparse, cls_ids=cls_ids)
         logits, _, = SEMRenderer_sparse(raster_settings=sparse_cam)(**seman_rendervar)
         self.debug_helper.log_render_sem_logits(
             logits,
@@ -643,11 +659,13 @@ class SemSplatam(SplatamOurs):
         variables = self.variables
         intrinsics = self.intrinsics
         first_frame_w2c = self.first_frame_w2c
-        cam = self.cam
+        cam_gs = self.cam_gs
+        cam_sparse = self.cam_sparse
         seperate_densification_res = self.seperate_densification_res
         if seperate_densification_res:
             densify_intrinsics = self.densify_intrinsics
-            densify_cam = self.densify_cam
+            densify_cam_gs = self.densify_cam_gs
+            densify_cam_sparse = self.densify_cam_sparse
         config = self.config
         gt_w2c_all_frames = self.gt_w2c_all_frames
         if self.config['use_wandb']:
@@ -657,7 +675,8 @@ class SemSplatam(SplatamOurs):
         eval_dir = self.eval_dir
         seperate_tracking_res = self.seperate_tracking_res
         if seperate_tracking_res:
-            tracking_cam = self.tracking_cam
+            tracking_cam_gs = self.tracking_cam_gs
+            tracking_cam_sparse = self.tracking_cam_sparse
             tracking_intrinsics = self.tracking_intrinsics
         keyframe_list = self.keyframe_list
         num_frames = self.num_frames
@@ -708,8 +727,18 @@ class SemSplatam(SplatamOurs):
 
 
         # Initialize Mapping Data for selected frame
-        curr_data = {'cam': cam, 'im': color, 'depth': depth, 'seman': seman, 'id': iter_time_idx, 'intrinsics': intrinsics,
-                     'w2c': first_frame_w2c, 'iter_gt_w2c_list': curr_gt_w2c}
+        # Keep GS and semantic cameras separate for rasterizer compatibility.
+        curr_data = {
+            'cam_gs': cam_gs,
+            'cam_sparse': cam_sparse,
+            'im': color,
+            'depth': depth,
+            'seman': seman,
+            'id': iter_time_idx,
+            'intrinsics': intrinsics,
+            'w2c': first_frame_w2c,
+            'iter_gt_w2c_list': curr_gt_w2c,
+        }
         
         # # Initialize Data for Tracking
         if seperate_tracking_res:
@@ -718,8 +747,16 @@ class SemSplatam(SplatamOurs):
             tracking_color = F.interpolate(color.unsqueeze(0), (tracking_h, tracking_w), mode='bilinear')[0]
             tracking_depth = F.interpolate(depth.unsqueeze(0), (tracking_h, tracking_w), mode='nearest')[0]
             
-            tracking_curr_data = {'cam': tracking_cam, 'im': tracking_color, 'depth': tracking_depth, 'id': iter_time_idx,
-                                  'intrinsics': tracking_intrinsics, 'w2c': first_frame_w2c, 'iter_gt_w2c_list': curr_gt_w2c}
+            tracking_curr_data = {
+                'cam_gs': tracking_cam_gs,
+                'cam_sparse': tracking_cam_sparse,
+                'im': tracking_color,
+                'depth': tracking_depth,
+                'id': iter_time_idx,
+                'intrinsics': tracking_intrinsics,
+                'w2c': first_frame_w2c,
+                'iter_gt_w2c_list': curr_gt_w2c,
+            }
         else:
             tracking_curr_data = curr_data
 
@@ -856,8 +893,17 @@ class SemSplatam(SplatamOurs):
                     densify_color = F.interpolate(color.unsqueeze(0), (densify_h, densify_w), mode='bilinear')[0]
                     densify_depth = F.interpolate(depth.unsqueeze(0), (densify_h, densify_w), mode='nearest')[0]
                     densify_seman = F.interpolate(seman.unsqueeze(0), (densify_h, densify_w), mode='bilinear')[0]
-                    densify_curr_data = {'cam': densify_cam, 'im': densify_color, 'depth': densify_depth, 'seman': densify_seman,'id': time_idx,
-                                 'intrinsics': densify_intrinsics, 'w2c': first_frame_w2c, 'iter_gt_w2c_list': curr_gt_w2c}
+                    densify_curr_data = {
+                        'cam_gs': densify_cam_gs,
+                        'cam_sparse': densify_cam_sparse,
+                        'im': densify_color,
+                        'depth': densify_depth,
+                        'seman': densify_seman,
+                        'id': time_idx,
+                        'intrinsics': densify_intrinsics,
+                        'w2c': first_frame_w2c,
+                        'iter_gt_w2c_list': curr_gt_w2c,
+                    }
                 else:
                     densify_curr_data = curr_data
 
@@ -962,8 +1008,17 @@ class SemSplatam(SplatamOurs):
 
                 
                 iter_gt_w2c = self.gt_w2c_all_frames[:iter_time_idx+1]
-                iter_data = {'cam': cam, 'im': iter_color, 'depth': iter_depth, 'seman': iter_seman, 'id': iter_time_idx,
-                             'intrinsics': intrinsics, 'w2c': first_frame_w2c, 'iter_gt_w2c_list': iter_gt_w2c}
+                iter_data = {
+                    'cam_gs': cam_gs,
+                    'cam_sparse': cam_sparse,
+                    'im': iter_color,
+                    'depth': iter_depth,
+                    'seman': iter_seman,
+                    'id': iter_time_idx,
+                    'intrinsics': intrinsics,
+                    'w2c': first_frame_w2c,
+                    'iter_gt_w2c_list': iter_gt_w2c,
+                }
                 if iter_crop_mask is not None:
                     iter_data['crop_mask'] = iter_crop_mask
 
@@ -1131,11 +1186,14 @@ class SemSplatam(SplatamOurs):
         self.variables = variables
         self.intrinsics = intrinsics
         self.first_frame_w2c = first_frame_w2c
-        self.cam = cam
+        # Update canonical cameras (GS + semantic) after mapping step.
+        self.cam_gs = cam_gs
+        self.cam_sparse = cam_sparse
         self.seperate_densification_res = seperate_densification_res
         if self.seperate_densification_res:
             self.densify_intrinsics = densify_intrinsics
-            self.densify_cam = densify_cam
+            self.densify_cam_gs = densify_cam_gs
+            self.densify_cam_sparse = densify_cam_sparse
         self.config = config
         self.gt_w2c_all_frames = gt_w2c_all_frames
         if self.config['use_wandb']:
@@ -1144,7 +1202,9 @@ class SemSplatam(SplatamOurs):
             self.wandb_time_step = wandb_time_step
         self.seperate_tracking_res = seperate_tracking_res
         if self.seperate_tracking_res:
-            self.tracking_cam = tracking_cam
+            # Persist tracking cameras (GS + semantic) for alternate resolution.
+            self.tracking_cam_gs = tracking_cam_gs
+            self.tracking_cam_sparse = tracking_cam_sparse
             self.tracking_intrinsics = tracking_intrinsics
         
         self.keyframe_list = keyframe_list

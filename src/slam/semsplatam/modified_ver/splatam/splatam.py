@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 from third_parties.splatam.utils.slam_external import build_rotation
 from third_parties.splatam.utils.gs_external import update_params_and_optimizer, inverse_sigmoid,cat_params_to_optimizer, accumulate_mean2d_gradient
 from diff_gaussian_rasterization import GaussianRasterizer as Renderer
-from sparse_channel_rasterization import GaussianRasterizationSettings as Camera
+from diff_gaussian_rasterization import GaussianRasterizationSettings as Camera_gs
 from sparse_channel_rasterization import GaussianRasterizer as SEMRenderer_sparse
 from sparse_channel_rasterization import GaussianRasterizationSettings as Camera_sparse
 
@@ -24,6 +24,7 @@ from src.slam.semsplatam.modified_ver.semantic.oneformer import positive_normali
 from src.utils import active_sgm_debug as dbg
 
 def setup_camera(w, h, k, w2c, near=0.01, far=100, num_channels=102):
+    # NOTE: This camera uses sparse_channel_rasterization settings for semantic rendering.
     fx, fy, cx, cy = k[0][0], k[1][1], k[0][2], k[1][2]
     w2c = torch.tensor(w2c).cuda().float()
     cam_center = torch.inverse(w2c)[:3, 3]
@@ -35,7 +36,7 @@ def setup_camera(w, h, k, w2c, near=0.01, far=100, num_channels=102):
     full_proj = w2c.bmm(opengl_proj)
     # Background must match num_channels to avoid out-of-bounds reads in CUDA.
     bg = torch.zeros((num_channels,), dtype=torch.float32, device="cuda")
-    cam = Camera(
+    cam = Camera_sparse(
         image_height=h,
         image_width=w,
         tanfovx=w / (2 * fx),
@@ -211,8 +212,11 @@ def initialize_first_timestep(dataset, seman, num_frames, scene_radius_depth_rat
     intrinsics = intrinsics[:3, :3]
     w2c = torch.linalg.inv(pose)
 
-    # Setup Camera
-    cam = setup_camera(color.shape[2], color.shape[1], intrinsics.cpu().numpy(), w2c.detach().cpu().numpy(), num_channels=num_classes)
+    # Setup Cameras: GS (diff-gaussian) and semantic (sparse-channel) are kept separate.
+    cam_sparse = setup_camera(color.shape[2], color.shape[1], intrinsics.cpu().numpy(),
+                              w2c.detach().cpu().numpy(), num_channels=num_classes)
+    cam_gs = setup_camera_gs(color.shape[2], color.shape[1], intrinsics.cpu().numpy(),
+                             w2c.detach().cpu().numpy())
 
     if densify_dataset is not None:
         # Get Densification RGB-D Data & Camera Parameters
@@ -223,8 +227,10 @@ def initialize_first_timestep(dataset, seman, num_frames, scene_radius_depth_rat
         if (seman.shape[1] != H) or (seman.shape[2] != W):
             seman = F.interpolate(seman.unsqueeze(0), (H, W), mode='bilinear')[0]
         densify_intrinsics = densify_intrinsics[:3, :3]
-        densify_cam = setup_camera(color.shape[2], color.shape[1], densify_intrinsics.cpu().numpy(),
-                                   w2c.detach().cpu().numpy(),num_channels=seman.shape[0])
+        densify_cam_sparse = setup_camera(color.shape[2], color.shape[1], densify_intrinsics.cpu().numpy(),
+                                          w2c.detach().cpu().numpy(), num_channels=seman.shape[0])
+        densify_cam_gs = setup_camera_gs(color.shape[2], color.shape[1], densify_intrinsics.cpu().numpy(),
+                                         w2c.detach().cpu().numpy())
     else:
         densify_intrinsics = intrinsics
 
@@ -243,9 +249,9 @@ def initialize_first_timestep(dataset, seman, num_frames, scene_radius_depth_rat
     variables['n_cls'] = n_cls
 
     if densify_dataset is not None:
-        return params, variables, intrinsics, w2c, cam, densify_intrinsics, densify_cam
+        return params, variables, intrinsics, w2c, cam_gs, cam_sparse, densify_intrinsics, densify_cam_gs, densify_cam_sparse
     else:
-        return params, variables, intrinsics, w2c, cam
+        return params, variables, intrinsics, w2c, cam_gs, cam_sparse
 
 def initialize_new_params_with_seman(new_pt_cld, mean3_sq_dist, gaussian_distribution, TOPK=16):
     num_pts = new_pt_cld.shape[0]
@@ -294,7 +300,8 @@ def add_new_gaussians_with_seman(params, variables, curr_data, sil_thres,
     transformed_gaussians = transform_to_frame(params, time_idx, gaussians_grad=False, camera_grad=False)
     depth_sil_rendervar = transformed_params2depthplussilhouette(params, curr_data['w2c'],
                                                                  transformed_gaussians)
-    depth_sil, _, _, = Renderer(raster_settings=curr_data['cam'])(**depth_sil_rendervar)
+    # diff-gaussian-rasterization returns 8 outputs; keep the first (color/depth_sil).
+    depth_sil, _, *_ = Renderer(raster_settings=curr_data['cam_gs'])(**depth_sil_rendervar)
     silhouette = depth_sil[1, :, :]
     non_presence_sil_mask = (silhouette < sil_thres)
     # Check for new foreground objects by using GT depth
@@ -406,6 +413,39 @@ def set_camera_sparse(cam, cls_ids=None):
     dbg.log_sem_bg(cam)
     return cam
 
+
+def setup_camera_gs(w, h, k, w2c, near=0.01, far=100):
+    # NOTE: This camera uses diff_gaussian_rasterization settings for GS RGB/depth rendering.
+    fx, fy, cx, cy = k[0][0], k[1][1], k[0][2], k[1][2]
+    w2c = torch.tensor(w2c).cuda().float()
+    cam_center = torch.inverse(w2c)[:3, 3]
+    w2c = w2c.unsqueeze(0).transpose(1, 2)
+    opengl_proj = torch.tensor([[2 * fx / w, 0.0, -(w - 2 * cx) / w, 0.0],
+                                [0.0, 2 * fy / h, -(h - 2 * cy) / h, 0.0],
+                                [0.0, 0.0, far / (far - near), -(far * near) / (far - near)],
+                                [0.0, 0.0, 1.0, 0.0]]).cuda().float().unsqueeze(0).transpose(1, 2)
+    full_proj = w2c.bmm(opengl_proj)
+    # Background is RGB for GS rendering.
+    bg = torch.zeros((3,), dtype=torch.float32, device="cuda")
+    cam = Camera_gs(
+        image_height=h,
+        image_width=w,
+        tanfovx=w / (2 * fx),
+        tanfovy=h / (2 * fy),
+        kernel_size=0.0,
+        bg=bg,
+        scale_modifier=1.0,
+        viewmatrix=w2c,
+        projmatrix=full_proj,
+        sh_degree=0,
+        campos=cam_center,
+        prefiltered=False,
+        require_depth=True,
+        require_coord=False,
+        debug=False,
+    )
+    return cam
+
 def calc_cosine(tensor1, tensor2, dim=0,return_mean=True, required_normalize=True):
     if required_normalize:
         eps = 1e-8
@@ -513,12 +553,14 @@ def get_loss_with_seman(params, curr_data, variables, iter_time_idx, loss_weight
                                                                  transformed_gaussians)
     # RGB Rendering
     rgb_rendervar['means2D'].retain_grad()
-    im, radius, _, = Renderer(raster_settings=curr_data['cam'])(**rgb_rendervar)
+    # diff-gaussian-rasterization returns 8 outputs; keep RGB + radii.
+    im, radius, *_ = Renderer(raster_settings=curr_data['cam_gs'])(**rgb_rendervar)
     seen = radius>0
     variables['means2D'] = rgb_rendervar['means2D']  # Gradient only accum from colour render for densification
 
     # Depth & Silhouette Rendering
-    depth_sil, _, _, = Renderer(raster_settings=curr_data['cam'])(**depth_sil_rendervar)
+    # diff-gaussian-rasterization returns 8 outputs; keep the first (color/depth_sil).
+    depth_sil, _, *_ = Renderer(raster_settings=curr_data['cam_gs'])(**depth_sil_rendervar)
     depth = depth_sil[0, :, :].unsqueeze(0)
     silhouette = depth_sil[1, :, :]
     presence_sil_mask = (silhouette > sil_thres)
@@ -532,13 +574,14 @@ def get_loss_with_seman(params, curr_data, variables, iter_time_idx, loss_weight
     cls_ids = variables['seman_cls_ids'].to(seen.device)
     if cls_ids.shape[0] == seen.shape[0]:
         cls_ids = cls_ids[seen]
-    sparse_cam = set_camera_sparse(cam=curr_data['cam'], cls_ids=cls_ids)
+    # Use sparse-channel camera for semantic rasterization to avoid GS setting mismatch.
+    sparse_cam = set_camera_sparse(cam=curr_data['cam_sparse'], cls_ids=cls_ids)
     dbg.log_seman_rendervar(seman_rendervar, variables.get("seman_cls_ids", None))
     seman_im, _, = SEMRenderer_sparse(raster_settings=sparse_cam)(**seman_rendervar)
     dbg.log_seman_repeat(seman_im, seman_rendervar, sparse_cam, SEMRenderer_sparse)
     if dbg.env_flag("ACTIVE_SGM_DEBUG_SEM_SANITY", False):
         cls_zero = torch.zeros_like(variables['seman_cls_ids'])
-        cam_zero = set_camera_sparse(cam=curr_data['cam'], cls_ids=cls_zero)
+        cam_zero = set_camera_sparse(cam=curr_data['cam_sparse'], cls_ids=cls_zero)
         dbg.log_seman_sanity(seman_rendervar, sparse_cam, SEMRenderer_sparse, cam_zero)
     dbg.log_seman_loss_stats(seman_im, curr_data['seman'])
 
