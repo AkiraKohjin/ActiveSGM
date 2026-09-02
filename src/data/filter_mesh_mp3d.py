@@ -2,6 +2,8 @@ import open3d as o3d
 import numpy as np
 import trimesh
 import multiprocessing as mp
+import argparse
+from pathlib import Path
 from plyfile import PlyData, PlyElement
 from tqdm import tqdm
 
@@ -35,20 +37,31 @@ def sample_single_tri(input_):
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dataset", default="MP3D")
+    parser.add_argument(
+        "--scenes",
+        nargs="+",
+        default=["GdvgFV5R1Z5", "gZ6f7yhEvPG", "HxpKQynjfin", "pLe4wQe7qrG", "YmJkqBEsHnH"],
+    )
+    parser.add_argument("--threshold", type=float, default=0.1)
+    parser.add_argument("--data-root", default="./data")
+    args = parser.parse_args()
 
-    dataset = 'MP3D'
-    scenes = ["GdvgFV5R1Z5","gZ6f7yhEvPG","HxpKQynjfin","pLe4wQe7qrG","YmJkqBEsHnH"]
-    sample_ref_mesh = True
-    threshold = 0.1
+    dataset = args.dataset
+    scenes = args.scenes
+    threshold = args.threshold
+    data_root = Path(args.data_root)
+
     for scene in scenes:
-        source_mesh_file = f'./data/{dataset}/v1/scans/{scene}/mesh.obj'
-        semantic_ply_file = f'./data/{dataset}/v1/tasks/mp3d/{scene}/{scene}_semantic.ply'
+        source_mesh_file = data_root / dataset / "v1" / "scans" / scene / "mesh.obj"
+        semantic_ply_file = data_root / dataset / "v1" / "tasks" / "mp3d" / scene / f"{scene}_semantic.ply"
 
-        gt_mesh = o3d.io.read_triangle_mesh(source_mesh_file)
+        gt_mesh = o3d.io.read_triangle_mesh(str(source_mesh_file))
         gt_pc = gt_mesh.sample_points_uniformly(number_of_points=50000)
         gt_kdtree = o3d.geometry.KDTreeFlann(gt_pc)
 
-        ply = PlyData.read(semantic_ply_file)
+        ply = PlyData.read(str(semantic_ply_file))
         vertices = ply['vertex'].data
         faces = ply['face'].data
 
@@ -82,7 +95,7 @@ if __name__ == "__main__":
         vertex_el = PlyElement.describe(filtered_vertices, 'vertex')
         face_el = PlyElement.describe(filtered_faces, 'face')
 
-        output_ply_file = f'./data/{dataset}/v1/tasks/mp3d/{scene}/semantic_clean.ply'
-        PlyData([vertex_el, face_el], text=False).write(output_ply_file)
+        output_ply_file = data_root / dataset / "v1" / "tasks" / "mp3d" / scene / "semantic_clean.ply"
+        PlyData([vertex_el, face_el], text=False).write(str(output_ply_file))
         print(
             f"Cleaned semantic mesh saved to {output_ply_file} with {len(filtered_vertices)} vertices and {len(filtered_faces)} faces.")

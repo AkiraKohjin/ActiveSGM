@@ -98,7 +98,7 @@ def download_task_data(task_data, out_dir):
     print('Downloading MP task data for ' + str(task_data) + ' ...')
     for task_data_id in task_data:
         if task_data_id in TASK_FILES:
-            file = TASK_FILES[task_data_id]
+            file = TASK_FILES[task_data_id]  # ex: ['mp3d_habitat.zip']
             for filepart in file:
                 url = BASE_URL + RELEASE_TASKS + '/' + filepart
                 localpath = os.path.join(out_dir, filepart)
@@ -135,9 +135,9 @@ def main():
     print('Press any key to continue, or CTRL-C to exit.')
     # key = raw_input('')
 
-    release_file = BASE_URL + RELEASE + '.txt'
+    release_file = BASE_URL + RELEASE + '.txt' # ex: http://kaldir.vc.in.tum.de/matterport/v1/scans.txt
     release_scans = get_release_scans(release_file)
-    file_types = FILETYPES
+    file_types = FILETYPES  # default is to download all file types.
 
     # download task data
     if args.task_data:
@@ -161,7 +161,7 @@ def main():
         if scan_id not in release_scans:
             print('ERROR: Invalid scan id: ' + scan_id)
         else:
-            out_dir = os.path.join(args.out_dir, RELEASE, scan_id.strip())
+            out_dir = os.path.join(args.out_dir, RELEASE, scan_id.strip())  # ex: MP3D/v1/scans/GdvgFV5R1Z5
             download_scan(scan_id.strip(), out_dir, file_types)
     elif 'minos' not in args.task_data and args.id == 'ALL' or args.id == 'all':  # download entire release
         if len(file_types) == len(FILETYPES):
