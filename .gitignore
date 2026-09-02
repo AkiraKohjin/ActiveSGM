@@ -23,6 +23,19 @@ __pycache__/
 /visualization/
 /.ipynb_checkpoints/
 /.logs/
+/.pydeps/
+/.pydeps_min/
+
+# MP3D シーン設定は sem-map 側（configs/MP3D）で生成・管理しているため、
+# ここでは論文原典の5シーンだけを追跡する。二重管理でどちらが正か分からなくなるのを防ぐ。
+/configs/MP3D/*/
+!/configs/MP3D/GdvgFV5R1Z5/
+!/configs/MP3D/gZ6f7yhEvPG/
+!/configs/MP3D/HxpKQynjfin/
+!/configs/MP3D/pLe4wQe7qrG/
+!/configs/MP3D/YmJkqBEsHnH/
+# instance→mpcat40 LUT は sem-map 側と同一内容なので追跡しない（生成物）。
+/configs/MP3D/*/instance_to_mpcat40.json
 
 # Editor settings
 .vscode/
